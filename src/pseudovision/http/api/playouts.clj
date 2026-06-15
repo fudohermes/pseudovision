@@ -27,11 +27,28 @@
               count (case from
                       "now"     (sched/rebuild-from-now! db playout-id horizon-days)
                       "horizon" (sched/rebuild-horizon! db playout-id 7 horizon-days)
-                      (sched/rebuild-from-now! db playout-id horizon-days))]
-          {:status 200
-           :body {:message "Rebuild complete"
-                  :events-generated count
-                  :horizon-days horizon-days}})
+                      (sched/rebuild-from-now! db playout-id horizon-days))
+              ;; Fetch updated playout to check for build errors
+              updated-playout (db/get-playout-for-channel db channel-id)]
+          (if (and (:playouts/build-success updated-playout) 
+                   (some? (:playouts/build-message updated-playout)))
+            ;; Build succeeded but with messages
+            {:status 200
+             :body {:message "Rebuild complete"
+                    :events-generated count
+                    :horizon-days horizon-days
+                    :build-message (:playouts/build-message updated-playout)}}
+            (if (not (:playouts/build-success updated-playout))
+              ;; Build failed
+              {:status 400
+               :body {:message "Rebuild failed"
+                      :error (:playouts/build-message updated-playout)
+                      :events-generated count}}
+              ;; Build succeeded
+              {:status 200
+               :body {:message "Rebuild complete"
+                      :events-generated count
+                      :horizon-days horizon-days}})))
         {:status 404 :body {:error "No playout for this channel"}}))))
 
 (defn list-events-handler [{:keys [db]}]

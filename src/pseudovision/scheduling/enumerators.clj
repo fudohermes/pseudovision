@@ -92,36 +92,53 @@
 ;; ---------------------------------------------------------------------------
 
 (defmulti next-item
-  "Returns [item updated-enumerator].  Wraps around on exhaustion."
+  "Returns [item updated-enumerator].  Wraps around on exhaustion.
+   Raises an error with diagnostic info if items list is empty."
   (fn [enumerator] (:playback-order enumerator)))
 
 (defmethod next-item :chronological [{:keys [items index] :as e}]
-  (let [n     (count items)
-        idx   (mod index n)
-        item  (nth items idx)]
-    [item (assoc e :index (inc index))]))
+  (let [n     (count items)]
+    (when (zero? n)
+      (throw (ex-info "Cannot enumerate over empty items list"
+                     {:playback-order :chronological
+                      :enumerator e})))
+    (let [idx   (mod index n)
+          item  (nth items idx)]
+      [item (assoc e :index (inc index))])))
 
 (defmethod next-item :random [{:keys [items index order seed] :as e}]
   ;; On each new pass (pos wraps to 0) generate a fresh shuffle with an
   ;; incremented seed so successive passes differ.
-  (let [n   (count items)
-        pos (mod index n)
-        [order' seed'] (if (zero? pos)
-                         (let [new-seed (+ seed 1)]
-                           [(shuffled-indices n new-seed) new-seed])
-                         [order seed])
-        item (nth items (nth order' pos))]
-    [item (assoc e :index (inc index) :order order' :seed seed')]))
+  (let [n   (count items)]
+    (when (zero? n)
+      (throw (ex-info "Cannot enumerate over empty items list"
+                     {:playback-order :random
+                      :enumerator e})))
+    (let [pos (mod index n)
+          [order' seed'] (if (zero? pos)
+                           (let [new-seed (+ seed 1)]
+                             [(shuffled-indices n new-seed) new-seed])
+                           [order seed])
+          item (nth items (nth order' pos))]
+      [item (assoc e :index (inc index) :order order' :seed seed')])))
 
 (defmethod next-item :shuffle [{:keys [items index order] :as e}]
-  (let [n    (count items)
-        idx  (mod index n)
-        item (nth items (nth order idx))]
-    [item (assoc e :index (inc index))]))
+  (let [n    (count items)]
+    (when (zero? n)
+      (throw (ex-info "Cannot enumerate over empty items list"
+                     {:playback-order :shuffle
+                      :enumerator e})))
+    (let [idx  (mod index n)
+          item (nth items (nth order idx))]
+      [item (assoc e :index (inc index))])))
 
 (defmethod next-item :semi-sequential [{:keys [items index seed batch-size batch-offset within-batch-idx] :as e}]
   ;; Play batch-size items sequentially, then jump randomly to a new starting point
   (let [n (count items)]
+    (when (zero? n)
+      (throw (ex-info "Cannot enumerate over empty items list"
+                     {:playback-order :semi-sequential
+                      :enumerator e})))
     (if (>= within-batch-idx batch-size)
       ;; Batch complete - pick new random start position
       (let [new-offset  (inc batch-offset)

@@ -86,5 +86,8 @@
   [])
 
 (defmethod resolve-collection :default [_ds collection]
-  (log/error "Unknown collection kind" {:kind (:collections/kind collection)})
+  (log/error "Unknown collection kind; returning empty result" 
+            {:kind (:collections/kind collection)
+             :collection-id (:collections/id collection)
+             :collection-name (:collections/name collection)})
   [])
