@@ -21,7 +21,7 @@
     :else            :info))
 
 (defn ->system-config
-  [{:keys [log-level server database ffmpeg media scheduling streaming grout]}]
+  [{:keys [log-level server database ffmpeg media scheduling daily-slots streaming grout]}]
   (letfn [(parse-int [i] (if (string? i) (Integer/parseInt i) i))]
     {:pseudovision/logger    {:level     (parse-log-level (or log-level :info))}
      :pseudovision/db        {:jdbc-url  (:jdbc-url database)
@@ -35,6 +35,8 @@
      :pseudovision/scheduling (merge {:lookahead-hours 72
                                       :rebuild-interval-minutes 60}
                                      scheduling)
+     :pseudovision/daily-slots (merge {:fitter-strictness :warn-and-fill}
+                                      daily-slots)
      :pseudovision/streaming (merge {:db (ig/ref :pseudovision/db)}
                                     streaming)
       :pseudovision/grout     (or grout {})
@@ -45,6 +47,7 @@
                                :ffmpeg      (ig/ref :pseudovision/ffmpeg)
                                :media       (ig/ref :pseudovision/media)
                                :scheduling  (ig/ref :pseudovision/scheduling)
+                               :daily-slots (ig/ref :pseudovision/daily-slots)
                                :streams     (ig/ref :pseudovision/streaming)
                                :grout       (ig/ref :pseudovision/grout)
                                :jobs        (ig/ref :pseudovision/jobs)}}))
@@ -114,6 +117,12 @@
                           60 60 TimeUnit/SECONDS)
     (log/info "Channel Stream Manager ready")
     (assoc manager :reaper reaper)))
+
+;; Daily-slots configuration (slot-pack strictness policy). Just passes the
+;; map through; read once at handler init time in
+;; `pseudovision.http.api.daily-slots/ingest-daily-slots-handler`.
+(defmethod ig/init-key :pseudovision/daily-slots [_ opts] opts)
+(defmethod ig/halt-key! :pseudovision/daily-slots [_ _] nil)
 
 (defmethod ig/halt-key! :pseudovision/streaming [_ {:keys [reaper] :as manager}]
   (when reaper (.shutdownNow ^java.util.concurrent.ScheduledExecutorService reaper))

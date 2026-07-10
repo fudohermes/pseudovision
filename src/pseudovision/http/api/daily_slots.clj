@@ -311,7 +311,7 @@
 ;; item still overflows — see its docstring.
 ;; ---------------------------------------------------------------------------
 
-(def ^:private default-fit-tolerance-minutes
+(def default-fit-tolerance-minutes
   "Slack allowed between a slot's nominal duration and a candidate item's
    runtime when picking from a random:<category> pool. An item up to this many
    minutes under the slot's length is a perfect fit; an item up to this many
@@ -319,6 +319,50 @@
    Only when nothing in the pool is within this window do we fall back to
    whatever is closest, so a thin pool never fails a slot outright."
   15)
+
+(def fit-fallback-window-multiplier
+  "How much the closest-runtime fallback is allowed to expand beyond the
+   primary tolerance when nothing in the pool fits. A 2-hour slot's primary
+   tolerance is 15 min (105-135 min admitted); the fallback then considers
+   items within 2x that (75-165 min) — admitting a 90-min movie in a 2-hour
+   slot, but rejecting a 22-min episode in the same slot (98 min short of
+   the lower bound).
+
+   The 2x value was chosen to admit the two most common 'off-by-30min'
+   cases (30-min episode in 60-min slot; 90-min movie in 60-min slot)
+   while excluding the wildly-off-runtime case (22-min episode in 2-hr
+   slot). See `select-fitting-items` for the implementation; see
+   `*fitter-strictness*` for what happens when the expanded window is
+   also empty."
+  2)
+
+(def ^:dynamic *fitter-strictness*
+  "Policy applied when `select-fitting-items` cannot find a runtime-fitting
+   item even in the expanded window. One of:
+
+     :fail   — log a WARN and return []. The slot's loop in
+               `create-event-from-slot` accumulates the error, no event is
+               written, and the daily-slots response surfaces the missing
+               slot in `:errors`. This is the right policy for staging /
+               dev: every empty-pool case is visible, every wildly-off
+               runtime surfaces to the operator.
+
+     :warn-and-fill — log a WARN naming the bad pick and return the
+               single closest-runtime item anyway. Something is always
+               on-screen. The WARN is the audit trail. This is the right
+               policy for production once the bug is known and the LLM is
+               mostly generating well-shaped slot templates.
+
+     :off   — original behavior: closest-of-N from the entire pool, no
+               log. Useful as a temporary revert if the bound breaks a
+               channel in production. Not recommended for any long-term
+               use; exists for symmetry and quick rollback.
+
+   The default is :warn-and-fill because production reliability (something
+   on-screen) is more important than visible-error density. Operators who
+   want fail-loud should set `:daily-slots {:fitter-strictness :fail}` in
+   config.edn and re-roll the pod."
+  :warn-and-fill)
 
 (defn- playable-item?
   "True when `item` carries a known, positive runtime. Mirrors
@@ -354,22 +398,67 @@
    best matches a `target-secs`-long slot, within `tolerance-secs` slack.
    Prefers items that fit without overflowing; tolerates a small overflow
    next; falls back to the closest-runtime items overall (bounded to
-   `fallback-pool-cap`) only when nothing is within tolerance."
+   `fallback-pool-cap` AND to an expanded tolerance window) only when
+   nothing is within the primary tolerance. If the expanded window is
+   also empty, defers to `*fitter-strictness*` to decide between failing
+   the slot or admitting the single closest item.
+
+   The expanded window exists to admit the two common 'off-by-30min'
+   cases (a 30-min episode in a 60-min slot; a 90-min movie in a 60-min
+   slot) without admitting wildly-off-runtime content (a 22-min episode
+   in a 2-hour slot). The bound is `fit-fallback-window-multiplier`; see
+   its docstring for the rationale."
   [items target-secs tolerance-secs]
-  (let [lo    (- target-secs tolerance-secs)
-        hi    (+ target-secs tolerance-secs)
-        under (filterv #(<= lo (duration-secs %) target-secs) items)
-        over  (filterv #(< target-secs (duration-secs %) hi) items)]
+  (let [lo         (- target-secs tolerance-secs)
+        hi         (+ target-secs tolerance-secs)
+        expand     (* fit-fallback-window-multiplier tolerance-secs)
+        lo-expand  (- target-secs expand)
+        hi-expand  (+ target-secs expand)
+        under      (filterv #(<= lo (duration-secs %) target-secs) items)
+        over       (filterv #(< target-secs (duration-secs %) hi) items)
+        ;; Closest-fallback candidates: within the expanded window but
+        ;; outside the primary tolerance. The full pool is NOT a candidate
+        ;; — that's the bug this function fixes. (The original code's
+        ;; closest-of-N from the whole pool admitted wildly-off items
+        ;; when the pool was dominated by short content, e.g. a 22-min
+        ;; episode getting picked for a 2-hr random:sitcom slot on
+        ;; `spectrum`.)
+        expanded   (filterv #(<= lo-expand (duration-secs %) hi-expand) items)
+        pool-durs  (sort (map duration-secs items))]
     (cond
       (seq under) under
       (seq over)  over
-      (seq items) (do
-                    (log/warn "No pool item within fit tolerance; falling back to closest runtime"
-                              {:target-secs target-secs
-                               :tolerance-secs tolerance-secs
-                               :pool-size (count items)})
-                    (vec (take fallback-pool-cap (closest-first target-secs items))))
-      :else       [])))
+      (seq expanded)
+      (let [closest (vec (take fallback-pool-cap (closest-first target-secs expanded)))]
+        (log/warn "No pool item within fit tolerance; falling back to expanded window"
+                  {:target-secs target-secs
+                   :tolerance-secs tolerance-secs
+                   :expand-secs expand
+                   :pool-size (count items)
+                   :expanded-size (count expanded)
+                   :strictness *fitter-strictness*})
+        closest)
+      :else
+      (do
+        (log/warn "No pool item within expanded tolerance; slot will be empty"
+                  {:target-secs target-secs
+                   :tolerance-secs tolerance-secs
+                   :expand-secs expand
+                   :pool-size (count items)
+                   :pool-durations pool-durs
+                   :strictness *fitter-strictness*})
+        (cond
+          (= *fitter-strictness* :fail) []
+          (= *fitter-strictness* :warn-and-fill)
+          (let [closest (vec (take fallback-pool-cap (closest-first target-secs items)))]
+            (log/warn "fitter-strictness=:warn-and-fill; admitting closest item despite expanded-empty"
+                      {:target-secs target-secs
+                       :item-runtime (duration-secs (first closest))
+                       :item-runtime-vs-target
+                       (- (duration-secs (first closest)) target-secs)})
+            closest)
+          :else ;; :off or any unrecognized value
+          (vec (take fallback-pool-cap (closest-first target-secs items))))))))
 
 (defn- pick-item
   "Resolves a DailySlot's media_id to a concrete media-item row.
@@ -588,10 +677,28 @@
      1. Resolves media_id -> concrete media_item_id
      2. Creates a playout_event spanning [start_time, end_time]
    Events are inserted in bulk. Existing events in the date range are cleared
-   (non-manual only) so the daily-slot stream always wins."
-  [{:keys [db]}]
-  (fn [req]
-    (let [raw-id     (get-in req [:parameters :path :channel-id])
+   (non-manual only) so the daily-slot stream always wins.
+
+   `ctx` is the HTTP system context. Reads `:fitter-strictness` from
+   `(:daily-slots ctx)` (or `(:scheduling ctx)` for backwards compat) and
+   binds it to `*fitter-strictness*` for the duration of the request. This
+   is how operators configure the slot-empty vs. slot-fill-with-bad-pick
+   policy via config.edn — see `*fitter-strictness*` for the three
+   states. The binding form is intentional: it lets tests use
+   `binding` themselves for per-test overrides without depending on
+   `with-redefs` (which would affect every concurrent request)."
+  [{:keys [db daily-slots scheduling] :as _ctx}]
+  (let [configured (or (:fitter-strictness daily-slots)
+                       (:fitter-strictness scheduling)
+                       :warn-and-fill)
+        strictness (if (#{:fail :warn-and-fill :off} configured)
+                     configured
+                     (do (log/warn "Unknown :fitter-strictness value, falling back to :warn-and-fill"
+                                   {:configured configured})
+                         :warn-and-fill))]
+    (fn [req]
+      (binding [*fitter-strictness* strictness]
+        (let [raw-id     (get-in req [:parameters :path :channel-id])
           channel-id (try (Long/parseLong (str raw-id))
                          (catch Exception _ nil))
           ch         (when channel-id (channels-db/get-channel db channel-id))
@@ -656,4 +763,4 @@
              :body {:ingested   (count ok-events)
                     :skipped    (count errors)
                     :errors     (vec errors)
-                    :channel_id real-id}}))))))
+                    :channel_id real-id}}))))))))

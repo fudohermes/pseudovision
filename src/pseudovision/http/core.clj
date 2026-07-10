@@ -716,9 +716,9 @@
 
 (defn start-server!
   "Assembles the handler context from opts and starts a non-blocking Jetty server."
-  [{:keys [port db ffmpeg media scheduling streams grout jobs] :as _opts}]
+  [{:keys [port db ffmpeg media scheduling daily-slots streams grout jobs] :as _opts}]
   (let [ctx     {:db db :ffmpeg ffmpeg :media media :scheduling scheduling
-                 :streams streams :grout grout :jobs jobs}
+                 :daily-slots daily-slots :streams streams :grout grout :jobs jobs}
         handler (make-handler ctx)]
     (jetty/run-jetty handler {:port port :join? false})))
 

@@ -33,6 +33,24 @@
                ;; How often (minutes) the background rebuild job runs.
                :rebuild-interval-minutes 60}
 
+  ;; Daily-slots packer policy. The fitter decides what happens when
+  ;; `select-fitting-items` cannot find a runtime-fitting item for a
+  ;; `random:<category>` slot, even after expanding the tolerance window:
+  ;;
+  ;;   :fail         — slot returns empty; the per-slot error surfaces in
+  ;;                   the daily-slots response. Use this in dev/staging to
+  ;;                   catch packer bugs at quarterly regen time.
+  ;;   :warn-and-fill — slot is filled with the closest-runtime item anyway,
+  ;;                   but a WARN log names the bad pick. This is the
+  ;;                   default: production reliability (something on-screen)
+  ;;                   wins over visible-error density.
+  ;;   :off          — closest-of-N from the entire pool, no log. Not
+  ;;                   recommended; exists as a quick-revert option.
+  ;;
+  ;; See `pseudovision.http.api.daily-slots/*fitter-strictness*` for full
+  ;; semantics and `fit-fallback-window-multiplier` for the expansion bound.
+  :daily-slots {:fitter-strictness :warn-and-fill}
+
   ;; Live streaming paths.  streams-dir is where served HLS segments live;
   ;; scratch-dir is where per-encoder temporary files are written before
   ;; ingest.  In a sharded deployment streams-dir may be a shared PVC

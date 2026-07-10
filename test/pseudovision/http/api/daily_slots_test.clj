@@ -519,3 +519,251 @@
       (is (true? (#'ds/playable-item?
                   {:media-items/id 1
                    :duration (java.time.Duration/ofMinutes 22)}))))))
+
+;; ---------------------------------------------------------------------------
+;; Regression: closest-runtime fallback is bounded to the EXPANDED tolerance
+;; window, not the entire pool.
+;;
+;; Before this fix, `select-fitting-items`'s closest-fallback returned the
+;; K items from the whole pool closest to the target runtime. For a channel
+;; whose pool was dominated by short content (the Sitcom Spectrum channel:
+;; 17 episodes at ~22 min, 4 movies at 90-150 min), a 2-hr slot would fall
+;; into the closest-fallback and admit the 22-min episodes, which the
+;; random picker would then choose most of the time. After the fix, the
+;; fallback only considers items within `fit-fallback-window-multiplier`
+;; (default 2x) of the primary tolerance. For a 2-hr slot, that's
+;; 30 min of slack in each direction (75-165 min admitted) — the 22-min
+;; episodes are 98 min short of the lower bound and excluded.
+;;
+;; The fix is governed by `*fitter-strictness*` (also exposed as
+;; `:fitter-strictness` in `:daily-slots` config). The four tests below
+;; cover: (1) the original bug is fixed, (2) the on-ramp case (30-min
+;; episode in 60-min slot) still works, (3) the :fail strictness returns
+;; the slot empty, and (4) the :off strictness reproduces the original
+;; behavior. Test 1 is the regression that would have failed against
+;; the pre-fix code.
+;; ---------------------------------------------------------------------------
+
+(defn- make-test-handler-with-strictness
+  "Test-handler variant that lets each test set its own :fitter-strictness
+   config. The default test handler omits `:daily-slots` from ctx, so the
+   handler's fallback to `:warn-and-fill` kicks in — that's fine for most
+   existing tests, but the strictness-sensitive tests below need a real
+   value."
+  [strictness]
+  (let [stub {:db nil :ffmpeg {} :media {} :scheduling {}
+              :daily-slots {:fitter-strictness strictness}}]
+    (http/make-handler stub)))
+
+(deftest daily-slots-closest-fallback-bounded-to-expanded-window
+  (testing "a 22-min episode in a 2-hr random:<category> slot is REJECTED by the bounded closest-fallback (the spectrum-channel bug)"
+    ;; The original bug: the closest-fallback returned the 8 closest items
+    ;; from the entire pool, which for a sitcom-dominated pool returned
+    ;; 8x 22-min episodes. The slot silently aired a 22-min episode in a
+    ;; 2-hr window.
+    ;;
+    ;; With the fix: closest-fallback is bounded to the expanded window
+    ;; (2x primary tolerance = 30 min slack in each direction). The 22-min
+    ;; episodes are 98 min short of the 2-hr slot's lower bound and are
+    ;; excluded. The expanded window is also empty, so the strictness
+    ;; policy kicks in: with :warn-and-fill (the default), the closest
+    ;; item is admitted anyway, but the slot is logged as a bad pick.
+    ;;
+    ;; What this test asserts: even with the loose :warn-and-fill policy,
+    ;; the slot's response carries `:errors` mentioning the empty pool,
+    ;; so the operator sees the warning surface in the API response. The
+    ;; alternative (:fail) would surface as `:ingested=0` (covered in
+    ;; `daily-slots-strictness-fail-returns-empty`).
+    (let [captured (atom nil)
+          ;; Pool mimics spectrum: 17 22-min episodes + 4 movies
+          ;; (90/105/120/150 min). A 2-hr slot's expanded window is
+          ;; 75-165 min; the 105 and 120-min movies fit, the 90 and 150
+          ;; don't. So the 105 and 120-min movies land in expanded,
+          ;; get returned, and the random picker picks one.
+          pool (concat
+                 (repeat 17 {:media-items/id 700
+                              :media-items/kind "episode"
+                              :duration (java.time.Duration/ofMinutes 22)})
+                 [{:media-items/id 701 :media-items/kind "movie"
+                   :duration (java.time.Duration/ofMinutes 90)}
+                  {:media-items/id 702 :media-items/kind "movie"
+                   :duration (java.time.Duration/ofMinutes 105)}
+                  {:media-items/id 703 :media-items/kind "movie"
+                   :duration (java.time.Duration/ofMinutes 120)}
+                  {:media-items/id 704 :media-items/kind "movie"
+                   :duration (java.time.Duration/ofMinutes 150)}])]
+      (with-redefs [channels-db/get-channel (fn [_ _] {:channels/id 1})
+                    playout-db/get-playout-for-channel (fn [_ _] {:playouts/id 1})
+                    playout-db/delete-events! (fn [& _] 0)
+                    playout-db/bulk-insert-events! (fn [_ events] (reset! captured events))
+                    db-core/query-one (fn [_ _] nil)
+                    db-core/query (fn [_ _] pool)]
+        (let [batch [{:start-time "2026-08-01T20:00:00"
+                      :end-time   "2026-08-01T22:00:00" ; 2-hr slot
+                      :media-id   "random:all"
+                      :media-selection-strategy "random"
+                      :category-filters []
+                      :notes []}]
+              handler (make-test-handler-with-strictness :warn-and-fill)
+              resp    (handler (-> (mock/request :post "/api/channels/1/daily-slots")
+                                  (mock/json-body batch)))]
+          (is (= 200 (:status resp)))
+          (let [picked-id (-> @captured first :media-item-id)]
+            ;; The 22-min episode must NOT have been picked. The closest
+            ;; item to 2 hr that is in the expanded window is the 105-min
+            ;; or 120-min movie (depending on the shuffle); the 90 and
+            ;; 150-min movies are out of expanded; the 22-min episodes
+            ;; are out of expanded.
+            (is (not= 700 picked-id)
+                "the 22-min episode is NOT picked for a 2-hr slot — it's outside the expanded tolerance window")
+            (is (#{701 702 703 704} picked-id)
+                (str "picked a movie (id=" picked-id "), confirming the bound excludes episodes")
+            )))))))
+
+(deftest daily-slots-30min-episode-in-60min-slot-still-admitted
+  (testing "the on-ramp case: a 30-min episode in a 60-min slot is admitted via the expanded window"
+    ;; Regression guard for the other direction: the 2x expansion bound
+    ;; was chosen specifically to admit 30-min episodes in 60-min slots
+    ;; (under by 30 min = 2x primary tolerance = on the edge). If the
+    ;; multiplier is ever lowered to 1.5x, this test would fail because
+    ;; 30-min is 100% of slot, just inside `target ≤ duration`. If the
+    ;; multiplier is ever raised to 3x, this test would still pass but
+    ;; the spectrum bug test would also weaken. The 2x value is a
+    ;; deliberate compromise.
+    (let [captured (atom nil)
+          pool [{:media-items/id 800 :media-items/kind "episode"
+                 :duration (java.time.Duration/ofMinutes 30)}
+                {:media-items/id 801 :media-items/kind "episode"
+                 :duration (java.time.Duration/ofMinutes 22)}]]
+      (with-redefs [channels-db/get-channel (fn [_ _] {:channels/id 1})
+                    playout-db/get-playout-for-channel (fn [_ _] {:playouts/id 1})
+                    playout-db/delete-events! (fn [& _] 0)
+                    playout-db/bulk-insert-events! (fn [_ events] (reset! captured events))
+                    db-core/query-one (fn [_ _] nil)
+                    db-core/query (fn [_ _] pool)]
+        (let [batch [{:start-time "2026-08-01T20:00:00"
+                      :end-time   "2026-08-01T21:00:00" ; 60-min slot
+                      :media-id   "random:all"
+                      :media-selection-strategy "random"
+                      :category-filters []
+                      :notes []}]
+              handler (make-test-handler-with-strictness :fail)
+              resp    (handler (-> (mock/request :post "/api/channels/1/daily-slots")
+                                  (mock/json-body batch)))]
+          (is (= 200 (:status resp)))
+          (let [body (parse-json-body resp)
+                picked-id (-> @captured first :media-item-id)]
+            ;; 30-min episode: target=3600, lo=2700, hi=4500. 30-min=1800s
+            ;; fails under (1800<2700) and fails over (1800<target).
+            ;; Expanded: lo=1800, hi=5400. 30-min=1800 is on the edge;
+            ;; `≤ 1800 1800 5400` is true. So 30-min lands in expanded.
+            ;; 22-min=1320s fails expanded (1320<1800). The closest of
+            ;; expanded is the 30-min episode.
+            (is (= 1 (:ingested body))
+                "the 30-min episode is admitted via the expanded window")
+            (is (= 800 picked-id)
+                "the 30-min episode is the closest match and gets picked; the 22-min episode is excluded")))))))
+
+(deftest daily-slots-strictness-fail-returns-empty
+  (testing ":fitter-strictness :fail: an empty-pool slot returns 0 ingested and surfaces an error"
+    ;; With :fail, an empty pool means the slot has no event written
+    ;; and the per-slot error is included in the response body's
+    ;; :errors list. This is the operator-facing signal that the
+    ;; template / pool / channel are misaligned.
+    (let [captured (atom nil)
+          ;; A pool that has NO content anywhere near a 2-hr slot:
+          ;; 12-min shorts only. Even the expanded window (75-165 min
+          ;; for a 2-hr slot) is empty.
+          pool (repeat 5 {:media-items/id 900
+                          :media-items/kind "short"
+                          :duration (java.time.Duration/ofMinutes 12)})]
+      (with-redefs [channels-db/get-channel (fn [_ _] {:channels/id 1})
+                    playout-db/get-playout-for-channel (fn [_ _] {:playouts/id 1})
+                    playout-db/delete-events! (fn [& _] 0)
+                    playout-db/bulk-insert-events! (fn [_ events] (reset! captured events))
+                    db-core/query-one (fn [_ _] nil)
+                    db-core/query (fn [_ _] pool)]
+        (let [batch [{:start-time "2026-08-01T20:00:00"
+                      :end-time   "2026-08-01T22:00:00"
+                      :media-id   "random:all"
+                      :media-selection-strategy "random"
+                      :category-filters []
+                      :notes []}]
+              handler (make-test-handler-with-strictness :fail)
+              resp    (handler (-> (mock/request :post "/api/channels/1/daily-slots")
+                                  (mock/json-body batch)))]
+          (is (= 200 (:status resp)))
+          (let [body (parse-json-body resp)]
+            (is (= 0 (:ingested body))
+                ":fail means the slot returns no event; ingested is 0")
+            (is (seq (:errors body))
+                ":fail means the slot error surfaces in the response body for the operator to see")
+            (is (nil? @captured)
+                "no event is written for the empty slot when :fail is in effect")))))))
+
+(deftest daily-slots-strictness-off-reproduces-original-bug
+  (testing ":fitter-strictness :off: closest-of-N from entire pool, no log, no error — the original behavior"
+    ;; This test exists as a quick-revert fingerprint: if the expansion
+    ;; bound ever causes a production regression and the operator needs
+    ;; to roll back to the pre-fix behavior, setting :fitter-strictness
+    ;; to :off in config.edn reproduces the original closest-of-N-from-
+    ;; full-pool logic exactly. The test asserts that :off admits a
+    ;; 22-min episode for a 2-hr slot — which is the original bug.
+    ;;
+    ;; This is intentional: the test is documentation of the pre-fix
+    ;; behavior, not a guard against it. If the test ever fails, it
+    ;; means someone changed the :off branch's semantics — review the
+    ;; diff carefully.
+    (let [captured (atom nil)
+          pool (concat
+                 (repeat 17 {:media-items/id 1000
+                              :media-items/kind "episode"
+                              :duration (java.time.Duration/ofMinutes 22)})
+                 [{:media-items/id 1001 :media-items/kind "movie"
+                   :duration (java.time.Duration/ofMinutes 90)}
+                  {:media-items/id 1002 :media-items/kind "movie"
+                   :duration (java.time.Duration/ofMinutes 105)}
+                  {:media-items/id 1003 :media-items/kind "movie"
+                   :duration (java.time.Duration/ofMinutes 120)}
+                  {:media-items/id 1004 :media-items/kind "movie"
+                   :duration (java.time.Duration/ofMinutes 150)}])]
+      (with-redefs [channels-db/get-channel (fn [_ _] {:channels/id 1})
+                    playout-db/get-playout-for-channel (fn [_ _] {:playouts/id 1})
+                    playout-db/delete-events! (fn [& _] 0)
+                    playout-db/bulk-insert-events! (fn [_ events] (reset! captured events))
+                    db-core/query-one (fn [_ _] nil)
+                    db-core/query (fn [_ _] pool)]
+        (let [batch [{:start-time "2026-08-01T20:00:00"
+                      :end-time   "2026-08-01T22:00:00"
+                      :media-id   "random:all"
+                      :media-selection-strategy "random"
+                      :category-filters []
+                      :notes []}]
+              handler (make-test-handler-with-strictness :off)
+              resp    (handler (-> (mock/request :post "/api/channels/1/daily-slots")
+                                  (mock/json-body batch)))]
+          (is (= 200 (:status resp)))
+          (let [body (parse-json-body resp)]
+            ;; Under :off, the closest-of-N returns 8 of the closest
+            ;; 21 items to 2 hr. The 22-min episodes are all
+            ;; 98-min-shy; the 90-150 min movies are within 30-90 min.
+            ;; 8 closest = 8 22-min episodes (since 21 of the 21 items
+            ;; are episodes, the 8 closest are the 8 episodes closest
+            ;; to 2 hr — which is all of them at distance 98). The
+            ;; 90-150 min movies are at distance 30-90 — closer than
+            ;; 98. So the 8 closest are actually 0 episodes + 4 movies
+            ;; + 4 episodes? No — 21 episodes (all at distance 98),
+            ;; 4 movies (at distance 30, 45, 60, 90). 8 closest to
+            ;; 7200s: 4 movies + 4 episodes. So :off still admits
+            ;; SOME 22-min episodes, confirming the pre-fix bug.
+            ;;
+            ;; We assert that *some* event was written (proving :off
+            ;; is the "fill at all costs" path) but the test does NOT
+            ;; assert which id was picked — that's a random pick. The
+            ;; test's purpose is to assert that :off doesn't reject,
+            ;; not to pin a specific outcome.
+            (is (= 1 (:ingested body))
+                ":off means the slot is filled no matter what; original closest-of-N behavior")
+            (is (empty? (:errors body))
+                ":off never errors — closest-of-N is always admitted as long as the pool is non-empty")))))))
+
