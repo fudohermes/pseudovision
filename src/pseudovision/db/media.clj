@@ -638,18 +638,16 @@
   ;; PreparedStatement, or whether something in the SQL pipeline is
   ;; stripping it.
   (log/debug "create-collection!: attrs at db entry" {:attrs attrs})
-  (let [formatted-sql (-> (h/insert-into :collections)
-                          (h/values [(cond-> attrs
-                                       (:kind attrs)   (update :kind #(sql-util/->pg-enum "collection_kind" %))
-                                       (:config attrs) (update :config sql-util/->jsonb))])
-                          sql/format)
-        ;; sql/format returns [sql-string params]. Log the SQL string
-        ;; and a structural view of the params (don't log the full
-        ;; PGobject value to keep log lines readable, but DO log the
-        ;; type/value shape so we can tell if the PGobject is in there).
-        [sql-str params] (if (vector? formatted-sql)
-                           formatted-sql
-                           [formatted-sql []])
+  (let [honey-map    (-> (h/insert-into :collections)
+                         (h/values [(cond-> attrs
+                                      (:kind attrs)   (update :kind #(sql-util/->pg-enum "collection_kind" %))
+                                      (:config attrs) (update :config sql-util/->jsonb))]))
+        ;; Call sql/format with {:params true} to get a [sql-string params]
+        ;; vector back. Default sql/format just returns the HoneySQL map (which
+        ;; next.jdbc consumes directly via its own format call). The previous
+        ;; diagnostic tried to destructure sql/format as a vector and crashed
+        ;; with ISeq-from-PGobject because the format was a HoneySQL map.
+        [sql-str params] (sql/format honey-map {:params true})
         param-shapes (mapv (fn [p]
                              (cond
                                (instance? org.postgresql.util.PGobject p)
@@ -662,10 +660,10 @@
                                :else {:type (.getName (class p)) :value (str p)}))
                            params)]
     (log/debug "create-collection!: formatted SQL + param shapes"
-               {:sql (first (if (vector? formatted-sql) formatted-sql [formatted-sql []]))
+               {:sql sql-str
                 :param-count (count params)
                 :param-shapes param-shapes})
-    (let [result (db/execute-one! ds formatted-sql)]
+    (let [result (db/execute-one! ds honey-map)]
       (log/debug "create-collection!: result from RETURNING"
                  {:id            (:id result)
                   :config        (:config result)
@@ -683,14 +681,11 @@
   ;; round-tripped row's :config. PUT /api/media/collections/{id}
   ;; also returns config: {} in the response, so we need to see
   ;; whether the bug is in the SQL path or in the response path.
-  (let [formatted-sql (-> (h/update :collections)
+  (let [honey-map    (-> (h/update :collections)
                           (h/set (cond-> attrs
                                    (:config attrs) (update :config sql-util/->jsonb)))
-                          (h/where [:= :id id])
-                          sql/format)
-        [sql-str params] (if (vector? formatted-sql)
-                           formatted-sql
-                           [formatted-sql []])
+                          (h/where [:= :id id]))
+        [sql-str params] (sql/format honey-map {:params true})
         param-shapes (mapv (fn [p]
                              (cond
                                (instance? org.postgresql.util.PGobject p)
@@ -703,11 +698,11 @@
                                :else {:type (.getName (class p)) :value (str p)}))
                            params)]
     (log/debug "update-collection!: formatted SQL + param shapes"
-               {:sql (first (if (vector? formatted-sql) formatted-sql [formatted-sql []]))
+               {:sql sql-str
                 :param-count (count params)
                 :param-shapes param-shapes
                 :attrs-config-key? (contains? attrs :config)})
-    (let [result (db/execute-one! ds formatted-sql)]
+    (let [result (db/execute-one! ds honey-map)]
       (log/debug "update-collection!: result from RETURNING"
                  {:id            (:id result)
                   :config        (:config result)
