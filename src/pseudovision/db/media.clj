@@ -642,12 +642,20 @@
                          (h/values [(cond-> attrs
                                       (:kind attrs)   (update :kind #(sql-util/->pg-enum "collection_kind" %))
                                       (:config attrs) (update :config sql-util/->jsonb))]))
-        ;; Call sql/format with {:params true} to get a [sql-string params]
-        ;; vector back. Default sql/format just returns the HoneySQL map (which
-        ;; next.jdbc consumes directly via its own format call). The previous
-        ;; diagnostic tried to destructure sql/format as a vector and crashed
-        ;; with ISeq-from-PGobject because the format was a HoneySQL map.
-        [sql-str params] (sql/format honey-map {:params true})
+        ;; HoneySQL 2.x's sql/format returns a flat vector:
+        ;;   [sql-string param1 param2 param3 ...]
+        ;; The first element is the SQL string; the rest are the positional
+        ;; params (in the order the ? placeholders appear in the SQL).
+        ;; Round 3 of this diagnostic (PR #134) tried to destructure it as
+        ;; `[sql-str params]` (assuming a 2-element vector); that crashed
+        ;; because the format was actually a HoneySQL map, not a vector.
+        ;; Round 4 (PR #135) tried `(sql/format honey-map {:params true})`
+        ;; assuming :params is a boolean toggle; that crashed because in
+        ;; HoneySQL :params is a *map* of named parameters and `reduce-kv`
+        ;; was being called on a Boolean.
+        ;; Round 5 (this commit): drop the bad :params option, use
+        ;; positional destructuring `[sql-str & params]`.
+        [sql-str & params] (sql/format honey-map)
         param-shapes (mapv (fn [p]
                              (cond
                                (instance? org.postgresql.util.PGobject p)
@@ -685,7 +693,7 @@
                           (h/set (cond-> attrs
                                    (:config attrs) (update :config sql-util/->jsonb)))
                           (h/where [:= :id id]))
-        [sql-str params] (sql/format honey-map {:params true})
+        [sql-str & params] (sql/format honey-map)
         param-shapes (mapv (fn [p]
                              (cond
                                (instance? org.postgresql.util.PGobject p)
