@@ -370,63 +370,68 @@
    cursor-managed enumerator fill is used (count mode always uses it).
 
    Small tail gaps (≤ 15 seconds) are preferentially filled with auto-generated
-   bumper items when a bumper collection exists for the channel."
+   bumper items sourced from Grout, when a suitable one exists for the
+   channel."
   [db cursor slot channel role from to playout-id opts]
-  ;; --- Bumper priority for small tail gaps ---
-  (when (and (= role :tail) to)
-    (when-let [bumper-events (filler/fill-gap-with-bumper
-                              db (:channels/id channel) from to playout-id)]
-      (let [guide   (:next-guide-group cursor)
-            slot-id (:schedule-slots/id slot)
-            events  (mapv #(assoc % :guide-group guide :slot-id slot-id)
-                          bumper-events)]
-        (log/debug "Injected bumper for small gap"
-                   {:channel (:channels/name channel)
-                    :gap-secs (t/duration->seconds (t/duration-between from to))
-                    :count (count events)})
-        [events cursor])))
-  ;; --- Regular filler ---
-  (if-let [preset-ref (filler/resolve-filler-preset role slot channel)]
-    (if-let [preset (filler-db/get-filler-preset db (:id preset-ref))]
-      ;; Drop unplayable (zero/unknown duration) filler items up front so the
-      ;; enumerator and fill-gap below share the same item vector and the
-      ;; duration-mode fill loop can't spin on a zero-length item.
-      (let [until (if (#{:pre :mid :post} role)
-                    (point-filler-window preset from to)
-                    to)
-            ;; A preset carrying grout-tags draws its candidates from Grout
-            ;; (queried by channel + tags + the gap duration), ingested on the
-            ;; fly as local-path media items; otherwise use its local collection
-            ;; / media item.  Both paths yield the same candidate shape, so the
-            ;; packer / enumerator below are unchanged.
-            items (filterv playable?
-                           (if (seq (:filler-presets/grout-tags preset))
-                             (grout-source/grout-filler-items db (:grout opts) channel from until preset)
-                             (filler-db/load-filler-items db preset)))]
-        (if (and (:pack-filler? opts)
-                 (= "duration" (:filler-presets/mode preset)))
-          (pack-filler cursor slot role from until items playout-id opts)
-          (let [ckey    (str "filler:" (name role) ":" (:filler-presets/id preset))
-                e       (cursor/get-enumerator cursor ckey items :random {:seed (get opts :seed 0)})
-                result  (filler/fill-gap from until preset items e playout-id)
-                ;; fill-gap emits the bare content columns; stamp the same
-                ;; guide-group / slot-id that content events carry so every row
-                ;; bulk-inserted in build! has an identical column set.
-                guide   (:next-guide-group cursor)
-                slot-id (:schedule-slots/id slot)
-                events  (mapv #(assoc % :guide-group guide :slot-id slot-id)
-                              (:events result))
-                cursor' (cursor/save-enumerator cursor ckey (:enumerator result))]
-            [events cursor'])))
-      ;; preset-ref resolved but the row vanished — treat as unconfigured.
-      (grout-channel-fallback db cursor slot channel role from to playout-id opts))
-    ;; No preset configured for this role at slot or channel level: for the
-    ;; gap-filling roles, fall back to channel-mapped Grout filler so the gap
-    ;; doesn't become dead air.  Inline roles (:pre, :mid) keep the old "nothing"
-    ;; behaviour — they decorate content, they don't pad dead air.
-    (if (#{:tail :fallback :post} role)
-      (grout-channel-fallback db cursor slot channel role from to playout-id opts)
-      [[] cursor])))
+  (or
+   ;; --- Bumper priority for small tail gaps ---
+   ;; `or`'d with the regular-filler branch below so a real [events cursor]
+   ;; short-circuits it; a nil (no small gap, or Grout had nothing in range)
+   ;; falls through to regular filler.
+   (when (and (= role :tail) to)
+     (when-let [bumper-events (filler/fill-gap-with-bumper
+                               db (:grout opts) channel from to playout-id)]
+       (let [guide   (:next-guide-group cursor)
+             slot-id (:schedule-slots/id slot)
+             events  (mapv #(assoc % :guide-group guide :slot-id slot-id)
+                           bumper-events)]
+         (log/debug "Injected bumper for small gap"
+                    {:channel (:channels/name channel)
+                     :gap-secs (t/duration->seconds (t/duration-between from to))
+                     :count (count events)})
+         [events cursor])))
+   ;; --- Regular filler ---
+   (if-let [preset-ref (filler/resolve-filler-preset role slot channel)]
+     (if-let [preset (filler-db/get-filler-preset db (:id preset-ref))]
+       ;; Drop unplayable (zero/unknown duration) filler items up front so the
+       ;; enumerator and fill-gap below share the same item vector and the
+       ;; duration-mode fill loop can't spin on a zero-length item.
+       (let [until (if (#{:pre :mid :post} role)
+                     (point-filler-window preset from to)
+                     to)
+             ;; A preset carrying grout-tags draws its candidates from Grout
+             ;; (queried by channel + tags + the gap duration), ingested on the
+             ;; fly as local-path media items; otherwise use its local collection
+             ;; / media item.  Both paths yield the same candidate shape, so the
+             ;; packer / enumerator below are unchanged.
+             items (filterv playable?
+                            (if (seq (:filler-presets/grout-tags preset))
+                              (grout-source/grout-filler-items db (:grout opts) channel from until preset)
+                              (filler-db/load-filler-items db preset)))]
+         (if (and (:pack-filler? opts)
+                  (= "duration" (:filler-presets/mode preset)))
+           (pack-filler cursor slot role from until items playout-id opts)
+           (let [ckey    (str "filler:" (name role) ":" (:filler-presets/id preset))
+                 e       (cursor/get-enumerator cursor ckey items :random {:seed (get opts :seed 0)})
+                 result  (filler/fill-gap from until preset items e playout-id)
+                 ;; fill-gap emits the bare content columns; stamp the same
+                 ;; guide-group / slot-id that content events carry so every row
+                 ;; bulk-inserted in build! has an identical column set.
+                 guide   (:next-guide-group cursor)
+                 slot-id (:schedule-slots/id slot)
+                 events  (mapv #(assoc % :guide-group guide :slot-id slot-id)
+                               (:events result))
+                 cursor' (cursor/save-enumerator cursor ckey (:enumerator result))]
+             [events cursor'])))
+       ;; preset-ref resolved but the row vanished — treat as unconfigured.
+       (grout-channel-fallback db cursor slot channel role from to playout-id opts))
+     ;; No preset configured for this role at slot or channel level: for the
+     ;; gap-filling roles, fall back to channel-mapped Grout filler so the gap
+     ;; doesn't become dead air.  Inline roles (:pre, :mid) keep the old "nothing"
+     ;; behaviour — they decorate content, they don't pad dead air.
+     (if (#{:tail :fallback :post} role)
+       (grout-channel-fallback db cursor slot channel role from to playout-id opts)
+       [[] cursor]))))
 
 (defn- next-fixed-start
   "Returns the next wall-clock Instant when `slot` would fire on or after `after`.
