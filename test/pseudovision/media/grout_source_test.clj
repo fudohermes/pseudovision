@@ -83,6 +83,55 @@
                                       (Instant/now) (Instant/now)
                                       {:filler-presets/grout-tags ["x"]})))))
 
+(deftest grout-filler-items-excludes-bumper-kind-clips
+  (testing "bumpers are reserved for the dedicated small-gap injector, not regular filler"
+    (let [clips [{:id "c1" :kind "filler" :path "/data/c1.mp4" :duration-ms 30000}
+                 {:id "c2" :kind "bumper" :path "/data/c2.mp4" :duration-ms 10000}]]
+      (with-redefs [grout/find-filler        (fn [& _] clips)
+                    sut/ensure-library-path! (fn [_ _] 7)
+                    sut/ingest-clip!         (fn [_ _ c] {:media-items/id (:id c)
+                                                          :media-versions/duration
+                                                          (Duration/ofMillis (:duration-ms c))})]
+        (let [result (sut/grout-filler-items nil enabled-client
+                                             {:channels/name "Britannia"}
+                                             (Instant/now) (Instant/now)
+                                             {:filler-presets/grout-tags ["x"]})]
+          (is (= ["c1"] (map :media-items/id result))))))))
+
+;; ---------------------------------------------------------------------------
+;; grout-bumper-items
+;; ---------------------------------------------------------------------------
+
+(deftest grout-bumper-items-empty-when-disabled
+  (with-redefs [grout/find-filler (fn [& _] (throw (Exception. "should not query")))]
+    (is (= [] (sut/grout-bumper-items nil nil {} 4000 6000)))))
+
+(deftest grout-bumper-items-queries-bumper-kind-with-channel-and-window
+  (let [captured (atom nil)
+        clip     {:id "b1" :path "/data/b1.mp4" :duration-ms 5000}]
+    (with-redefs [grout/find-filler        (fn [_ opts] (reset! captured opts) [clip])
+                  sut/ensure-library-path! (fn [_ _] 7)
+                  sut/ingest-clip!         (fn [_ _ c] {:media-items/id 1
+                                                        :media-versions/duration
+                                                        (Duration/ofMillis (:duration-ms c))})]
+      (let [result (sut/grout-bumper-items nil enabled-client
+                                           {:channels/name "Britannia"}
+                                           4000 6000)]
+        (is (= 1 (count result)))
+        (let [opts @captured]
+          (is (= "bumper"    (:kind opts)))
+          (is (= "britannia" (:channel opts)))
+          (is (= 4000        (:min-ms opts)))
+          (is (= 6000        (:max-ms opts)))
+          (is (true?         (:random opts))))))))
+
+(deftest grout-bumper-items-empty-when-grout-has-no-match
+  (with-redefs [grout/find-filler        (fn [& _] [])
+                sut/ensure-library-path! (fn [& _] (throw (Exception. "no ingest expected")))]
+    (is (= [] (sut/grout-bumper-items nil enabled-client
+                                      {:channels/name "Britannia"}
+                                      4000 6000)))))
+
 ;; ---------------------------------------------------------------------------
 ;; content sync — program-tags
 ;; ---------------------------------------------------------------------------

@@ -196,16 +196,52 @@
   (if-not (grout/enabled? grout)
     []
     (let [gap-ms (when (and from to) (max 0 (.toMillis (Duration/between from to))))
-          clips  (grout/find-filler grout
-                                    (cond-> {:tags   (:filler-presets/grout-tags preset)
-                                             :random true}
-                                      (channel-tag channel) (assoc :channel (channel-tag channel))
-                                      (and gap-ms (pos? gap-ms)) (assoc :max-ms gap-ms)))]
+          clips  (->> (grout/find-filler grout
+                                         (cond-> {:tags   (:filler-presets/grout-tags preset)
+                                                  :random true}
+                                           (channel-tag channel) (assoc :channel (channel-tag channel))
+                                           (and gap-ms (pos? gap-ms)) (assoc :max-ms gap-ms)))
+                      ;; Bumpers are reserved for the dedicated small-gap
+                      ;; injector (see grout-bumper-items / fill-gap-with-bumper)
+                      ;; so they keep their "Coming up next" overlay treatment —
+                      ;; never surface them here as plain tail/fallback/pre/mid/
+                      ;; post filler.
+                      (remove #(= "bumper" (:kind %))))]
       (if (empty? clips)
         (do (log/info "Grout returned no filler candidates"
                       {:channel (channel-tag channel)
                        :tags    (:filler-presets/grout-tags preset)
                        :gap-ms  gap-ms})
+            [])
+        (let [lib-path-id (ensure-library-path! ds (:media-dir grout))]
+          (into [] (keep #(ingest-clip! ds lib-path-id %)) clips))))))
+
+(defn grout-bumper-items
+  "Queries Grout for **bumper**-kind clips on `channel` whose duration falls
+   within [min-ms, max-ms], ingests each as a local-path media item, and
+   returns the candidate vector for the small-gap bumper injector
+   (`pseudovision.scheduling.filler/fill-gap-with-bumper`) to pick from.
+
+   This is the bumper counterpart to `grout-filler-items` above: same
+   ingest-and-return-candidates shape, but scoped to :kind \"bumper\" and a
+   tight duration window (a bucket ± tolerance) instead of an open-ended gap
+   ceiling, since bumpers fill a fixed-size slot rather than an arbitrary gap.
+
+   Returns [] when Grout is disabled/unreachable or has no match — the caller
+   then falls back to regular filler, exactly as with an empty local
+   collection."
+  [ds grout channel min-ms max-ms]
+  (if-not (grout/enabled? grout)
+    []
+    (let [clips (grout/find-filler grout
+                                   (cond-> {:kind    "bumper"
+                                            :random  true
+                                            :min-ms  min-ms
+                                            :max-ms  max-ms}
+                                     (channel-tag channel) (assoc :channel (channel-tag channel))))]
+      (if (empty? clips)
+        (do (log/info "Grout returned no bumper candidates"
+                      {:channel (channel-tag channel) :min-ms min-ms :max-ms max-ms})
             [])
         (let [lib-path-id (ensure-library-path! ds (:media-dir grout))]
           (into [] (keep #(ingest-clip! ds lib-path-id %)) clips))))))

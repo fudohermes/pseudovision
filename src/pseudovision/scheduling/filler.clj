@@ -10,8 +10,8 @@
    so shuffle seeds are preserved across rebuilds.
 
    Small gaps (≤ 15 seconds) are preferentially filled with bumper items
-   when a bumper collection exists for the channel."
-  (:require [pseudovision.db.filler :as filler-db]
+   sourced from Grout when a suitable one exists for the channel."
+  (:require [pseudovision.media.grout-source :as grout-source]
             [pseudovision.scheduling.enumerators :as enum]
             [pseudovision.util.sql  :as sql-util]
             [pseudovision.util.time :as t])
@@ -130,27 +130,26 @@
     (max 0 dur)))
 
 (defn fill-gap-with-bumper
-  "Try to fill a small gap with a bumper item.
+  "Try to fill a small gap with a bumper item sourced from Grout.
 
-   Only considers gaps ≤ max-bumper-gap-secs (15s).  Queries the channel's
-   bumper collection and picks an item whose duration matches the largest
-   standard bucket that fits the gap (5/10/15s).
+   Only considers gaps ≤ max-bumper-gap-secs (15s). Queries Grout for the
+   channel's bumper-kind clips (see `grout-source/grout-bumper-items`) whose
+   duration matches the largest standard bucket that fits the gap (5/10/15s),
+   ingesting the chosen clip as a local media item exactly like regular Grout
+   filler does.
 
-   Returns nil when no bumper is suitable so the caller can fall back to
-   regular filler."
-  [db channel-id from to playout-id]
+   Returns nil when no bumper is suitable (Grout disabled/unreachable, or no
+   candidate in range) so the caller can fall back to regular filler."
+  [db grout channel from to playout-id]
   (let [gap-secs (t/duration->seconds (t/duration-between from to))]
     (when (and (<= gap-secs max-bumper-gap-secs)
                (pos? gap-secs))
       (let [bucket (duration-bucket gap-secs)
             ;; Allow 1s tolerance so a 4.8s bumper can fill a 5s gap
             tolerance 1.0
-            items (filler-db/find-channel-bumper-items db channel-id)
-            candidates (filterv (fn [item]
-                                   (let [dur (item-duration-seconds item)]
-                                     (and (>= dur (- bucket tolerance))
-                                          (<= dur (+ bucket tolerance)))))
-                                 items)]
+            min-ms (long (* 1000 (- bucket tolerance)))
+            max-ms (long (* 1000 (+ bucket tolerance)))
+            candidates (grout-source/grout-bumper-items db grout channel min-ms max-ms)]
         (when (seq candidates)
           ;; Pick randomly for variety (no enumerator state needed for bumpers)
           (let [item (rand-nth candidates)

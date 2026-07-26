@@ -38,37 +38,6 @@
     :else []))
 
 ;; ---------------------------------------------------------------------------
-;; Bumper collections
-;; ---------------------------------------------------------------------------
-
-(defn find-bumper-collection
-  "Finds the bumper collection for a channel by name pattern.
-   Returns the collection row or nil."
-  [ds channel-id]
-  (db/query-one
-   ds
-   (-> (h/select :*)
-       (h/from :collections)
-       (h/where [:ilike :name (str "%Bumpers:%")])
-       sql/format)))
-
-(defn find-channel-bumper-items
-  "Returns all media items in a channel's bumper collection,
-   ordered by a stable key so selection is deterministic."
-  [ds channel-id]
-  (when-let [coll (find-bumper-collection ds channel-id)]
-    (let [coll-id (:collections/id coll)]
-      (db/query
-       ds
-       (-> (h/select :mi.* :mv.duration)
-           (h/from [:media-items :mi])
-           (h/join [:collection-items :ci] [:= :ci.media-item-id :mi.id])
-           (h/left-join [:media-versions :mv] [:= :mv.media-item-id :mi.id])
-           (h/where [:= :ci.collection-id coll-id])
-           (h/order-by :mi.id)
-           sql/format)))))
-
-;; ---------------------------------------------------------------------------
 ;; CRUD
 ;; ---------------------------------------------------------------------------
 
