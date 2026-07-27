@@ -256,3 +256,68 @@
         (is (= 1 (:updated r)))
         (is (= 1 (:skipped r)))
         (is (= 1 (:errors r)) "a throwing sync-program! is counted as an error, not fatal")))))
+
+;; ---------------------------------------------------------------------------
+;; display-title
+;;
+;; PV's metadata.title for Grout-sourced items is derived from a fallback chain
+;; because Grout bulk uploads leave name=null on most items. Without this,
+;; /api/media/items/{id} returns name=null for ~97% of the Grout catalog and
+;; the schedule renders them as opaque "Media Item #<n>" placeholders in
+;; Marquee (see marquee/pages/media_detail.cljs:148).
+;; ---------------------------------------------------------------------------
+
+(deftest display-title-prefers-grout-name
+  (testing "Grout's `name` field wins when present (e.g. Tunabrain-generated bumpers)"
+    (is (= "Enigma Unveiled"
+           (sut/display-title
+            {:id "abc" :name "Enigma Unveiled"
+             :tags ["channel:enigma-tv" "filename:enigma-1785...-5s-image.png"]})))))
+
+(deftest display-title-falls-back-to-filename-tag
+  (testing "bulk-uploaded programs without a name use the filename: intake tag"
+    (is (= "veritasium:2024-12-31 The Man Who Took LSD and Changed The World (2024)"
+           (sut/display-title
+            {:id "abc"
+             :tags ["parent-directory:veritasium"
+                    "filename:2024-12-31 The Man Who Took LSD and Changed The World (2024).mp4"
+                    "content-type:filler"
+                    "channel:infobytes"]})))))
+
+(deftest display-title-qualifies-bare-filename-with-parent-directory
+  (testing "bare date-stamped filenames are disambiguated with parent-directory: when available"
+    (is (= "veritasium:2024-12-10 34 Years Of Strandbeest Evolution (2024)"
+           (sut/display-title
+            {:id "abc"
+             :tags ["parent-directory:veritasium"
+                    "filename:2024-12-10 34 Years Of Strandbeest Evolution (2024).mp4"
+                    "channel:infobytes"]})))))
+
+(deftest display-title-falls-back-to-channel-placeholder
+  (testing "no name and no filename tag → channel-aware placeholder"
+    (is (= "Untitled infobytes program"
+           (sut/display-title
+            {:id "abc" :channel "infobytes" :tags []})))))
+
+(deftest display-title-falls-back-to-grout-id
+  (testing "no name, filename, or channel → opaque-but-stable Grout id placeholder"
+    (is (= "Unknown Grout item (abc)"
+           (sut/display-title {:id "abc" :tags []})))))
+
+(deftest display-title-final-fallback
+  (testing "absolute last resort"
+    (is (= "Unknown"
+           (sut/display-title {})))))
+
+(deftest display-title-trims-whitespace-in-filename
+  (testing "whitespace around the filename tag value is trimmed"
+    (is (= "name with surrounding spaces"
+           (sut/display-title
+            {:id "abc" :tags ["filename:  name with surrounding spaces  .mp4"]})))))
+
+(deftest display-title-treats-blank-filename-as-missing
+  (testing "filename: with empty/whitespace-only value is treated as no filename"
+    (is (= "Untitled britannia program"
+           (sut/display-title
+            {:id "abc" :channel "britannia"
+             :tags ["filename:   " "parent-directory:" "channel:britannia"]})))))

@@ -275,6 +275,68 @@
   (boolean (and (string? t)
                 (some #(str/starts-with? t %) grout-internal-tag-prefixes))))
 
+(defn- grout-filename-tag-value
+  "Returns the value of the first `filename:` tag on a Grout clip, or nil if no
+   such tag is present. `filename:` is one of Grout's intake/audit tags and is
+   filtered out of `metadata_tags` (see `grout-internal-tag?`), but we still
+   want it for display — see `display-title`."
+  [clip]
+  (some (fn [t]
+          (when (and (string? t) (str/starts-with? t "filename:"))
+            (not-empty (str/trim (subs t 9)))))
+        (:tags clip)))
+
+(defn- grout-parent-directory-tag-value
+  "Returns the value of the first `parent-directory:` tag on a Grout clip, or
+   nil if no such tag is present. See `grout-filename-tag-value` for context."
+  [clip]
+  (some (fn [t]
+          (when (and (string? t) (str/starts-with? t "parent-directory:"))
+            (not-empty (str/trim (subs t 17)))))
+        (:tags clip)))
+
+(defn- strip-extension
+  "Strip the trailing file extension (after the last `.`) from a filename. No-op
+   if there is no `.` or the trailing segment is empty. Trims surrounding
+   whitespace from the result so internal-padding whitespace before the
+   extension (e.g. `clip   .mp4`) doesn't survive into the display title."
+  [filename]
+  (when-let [dot-idx (.lastIndexOf ^String filename ".")]
+    (when (pos? dot-idx)
+      (str/trim (subs filename 0 dot-idx)))))
+
+(defn display-title
+  "Best-available display title for a Grout clip, in order of preference:
+
+   1. Grout's `name` field — human/AI-set (e.g. bumpers generated via Tunabrain)
+   2. Original upload filename (stripped of extension), extracted from the
+      `filename:` intake/audit tag
+   3. `<parent-directory>:<filename-stem>` if both are available, since bare
+      filenames like `2024-12-31 ...mp4` are ambiguous without their directory
+   4. Channel-aware placeholder: \"Untitled <channel> program\"
+   5. The Grout clip id
+   6. The literal string \"Unknown\"
+
+   Without this fallback chain, the PV API exposes `name: null` for bulk-uploaded
+   Grout items, and any UI that renders the title falls back to a numeric
+   \"Media Item #<id>\" placeholder — opaque and unsearchable. The first 3
+   options are real, useful, human-meaningful identifiers that already exist on
+   the Grout side; the rest are progressively more opaque."
+  [clip]
+  (or (not-empty (:name clip))
+      (let [filename (grout-filename-tag-value clip)]
+        (when filename
+          (let [stem      (or (not-empty (strip-extension filename)) filename)
+                parent    (grout-parent-directory-tag-value clip)]
+            (if parent
+              (str parent ":" stem)
+              stem))))
+      (when-let [chan (:channel clip)]
+        (when-not (str/blank? chan)
+          (str "Untitled " chan " program")))
+      (when-let [id (:id clip)] (str "Unknown Grout item (" id ")"))
+      "Unknown"))
+
 (defn- program-tags
   "metadata_tags names for a Grout program: its freeform Grout tags (with
    Grout-internal intake/audit tags filtered out — see
@@ -299,13 +361,19 @@
   "Writes/refreshes the `metadata` row (title/plot) and fully replaces the
    `metadata_tags` for a program media item from its Grout clip. Grout owns
    content metadata, so each sync makes PV's copy match Grout — including tag
-   removals. `name`/`description` are human/AI-owned in Grout; PV mirrors them."
+   removals.
+
+   `title` is computed via `display-title`: Grout's `name` field when present
+   (e.g. bumpers generated via Tunabrain), otherwise derived from the
+   `filename:` and `parent-directory:` intake/audit tags so unnamed bulk
+   uploads still get a useful display title in the API rather than rendering
+   as \"Media Item #<n>\" in Marquee."
   [tx item-id clip]
   (db/execute-one! tx
     (-> (h/insert-into :metadata)
         (h/values [{:media-item-id item-id
                     :kind  (sql-util/->pg-enum "media_item_kind" "program")
-                    :title (not-empty (:name clip))
+                    :title (display-title clip)
                     :plot  (not-empty (:description clip))}])
         (h/on-conflict :media-item-id)
         (h/do-update-set :title :plot :date-updated)
