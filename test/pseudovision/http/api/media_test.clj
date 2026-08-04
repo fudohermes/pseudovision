@@ -68,21 +68,23 @@
 
 (deftest get-media-item-returns-metadata-title-when-present
   (testing "Jellyfin item with metadata.title → that title is returned"
+    ;; db/get-media-item's query uses `[:m.title :name]` which aliases the
+    ;; SQL output column to `name`, so the row arrives with the qualified
+    ;; key `:m/name`. After unqualify-keys that becomes the unqualified
+    ;; `:name` key, which is what display-title-for-item looks up.
     (let [{:keys [status body]} (stub-handler
                                   {:media-items/id 1
-                                   :m/title "Rear.Window.1954..."
+                                   :m/name "Rear.Window.1954..."
                                    :media-items/remote-key "fc7619..."
                                    :media-items/kind "movie"})]
       (is (= 200 status))
-      ;; Response has :title from the metadata column (unqualified-keyed map
-      ;; via unqualify-keys) and :name from display-title-for-item.
       (is (= "Rear.Window.1954..." (:name body))))))
 
 (deftest get-media-item-falls-back-to-remote-key
   (testing "Grout filler item with no metadata.title → remote-key is returned"
     (let [{:keys [status body]} (stub-handler
                                   {:media-items/id 1649133
-                                   :m/title nil
+                                   :m/name nil
                                    :media-items/remote-key "grout:5c707253-..."
                                    :media-items/kind "other_video"})]
       (is (= 200 status))
@@ -92,7 +94,7 @@
   (testing "no metadata.title AND no remote-key → literal \"Unknown\""
     (let [{:keys [status body]} (stub-handler
                                   {:media-items/id 1
-                                   :m/title nil
+                                   :m/name nil
                                    :media-items/remote-key nil
                                    :media-items/kind "other_video"})]
       (is (= 200 status))

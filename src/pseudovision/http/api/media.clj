@@ -16,9 +16,10 @@
 (defn- display-title-for-item
   "Best-available display title for a media item, in order of preference:
 
-   1. `metadata.title` (the underlying column, aliased to `:title` after
-      `unqualify-keys` strips the `m/` prefix). Set for Jellyfin items and
-      for Grout program-kind items (see
+   1. `metadata.title`, which `db/get-media-item` aliases as `:name` in the
+      SQL output (`[:m.title :name]`). After `unqualify-keys` the field
+      surfaces as the unqualified `:name` key on the result map. Set for
+      Jellyfin items and for Grout program-kind items (see
       `pseudovision.media.grout-source/display-title`); null for Grout
       filler / bumper items that don't get a metadata row.
    2. `remote-key` — at least something non-numeric and discoverable
@@ -29,7 +30,7 @@
    as the opaque \"Media Item #<n>\" placeholder from
    marquee/pages/media_detail.cljs:148."
   [item]
-  (or (not-empty (:title item))
+  (or (not-empty (:name item))
       (not-empty (:remote-key item))
       "Unknown"))
 
