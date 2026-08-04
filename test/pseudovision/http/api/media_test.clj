@@ -44,3 +44,56 @@
               "only the jellyfin library is scanned; grout-content is skipped")
           (is (= 1 (get-in info [:result :scanned])))
           (is (= 1 (get-in info [:result :skipped]))))))))
+
+;; ---------------------------------------------------------------------------
+;; GET /api/media/items/:id — display-title wiring
+;;
+;; Regression: the api/media.clj display-title-for-item fallback chain was
+;; originally called with the *qualified-keyed* map from db/query-one (which
+;; has keys like :m/title), not the unqualified one (which has :name, etc).
+;; That made every branch of the fallback chain miss, so every item returned
+;; :name "Unknown" — even Jellyfin items with a real metadata.title. The fix
+;; is to unqualify-keys first, then pass the unqualified map to the display-
+;; title fallback.
+;; ---------------------------------------------------------------------------
+
+(defn- stub-handler [item-row]
+  (with-redefs [pseudovision.db.media/get-media-item (fn [_ _] item-row)]
+    (let [handler ((requiring-resolve 'pseudovision.http.api.media/get-media-item-handler)
+                   {:db nil})
+          resp    (handler (mock/request :get "/api/media/items/1"))]
+      ;; The handler already returns the response map directly (not via the
+      ;; respond middleware in this test path), so the body is a plain map.
+      {:status (:status resp) :body (:body resp)})))
+
+(deftest get-media-item-returns-metadata-title-when-present
+  (testing "Jellyfin item with metadata.title → that title is returned"
+    (let [{:keys [status body]} (stub-handler
+                                  {:media-items/id 1
+                                   :m/title "Rear.Window.1954..."
+                                   :media-items/remote-key "fc7619..."
+                                   :media-items/kind "movie"})]
+      (is (= 200 status))
+      ;; Response has :title from the metadata column (unqualified-keyed map
+      ;; via unqualify-keys) and :name from display-title-for-item.
+      (is (= "Rear.Window.1954..." (:name body))))))
+
+(deftest get-media-item-falls-back-to-remote-key
+  (testing "Grout filler item with no metadata.title → remote-key is returned"
+    (let [{:keys [status body]} (stub-handler
+                                  {:media-items/id 1649133
+                                   :m/title nil
+                                   :media-items/remote-key "grout:5c707253-..."
+                                   :media-items/kind "other_video"})]
+      (is (= 200 status))
+      (is (= "grout:5c707253-..." (:name body))))))
+
+(deftest get-media-item-final-fallback-is-unknown
+  (testing "no metadata.title AND no remote-key → literal \"Unknown\""
+    (let [{:keys [status body]} (stub-handler
+                                  {:media-items/id 1
+                                   :m/title nil
+                                   :media-items/remote-key nil
+                                   :media-items/kind "other_video"})]
+      (is (= 200 status))
+      (is (= "Unknown" (:name body))))))

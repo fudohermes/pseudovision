@@ -16,8 +16,9 @@
 (defn- display-title-for-item
   "Best-available display title for a media item, in order of preference:
 
-   1. `metadata.title` (already aliased as `:name` by `get-media-item`). Set
-      for Jellyfin items and for Grout program-kind items (see
+   1. `metadata.title` (the underlying column, aliased to `:title` after
+      `unqualify-keys` strips the `m/` prefix). Set for Jellyfin items and
+      for Grout program-kind items (see
       `pseudovision.media.grout-source/display-title`); null for Grout
       filler / bumper items that don't get a metadata row.
    2. `remote-key` — at least something non-numeric and discoverable
@@ -28,7 +29,7 @@
    as the opaque \"Media Item #<n>\" placeholder from
    marquee/pages/media_detail.cljs:148."
   [item]
-  (or (not-empty (:name item))
+  (or (not-empty (:title item))
       (not-empty (:remote-key item))
       "Unknown"))
 
@@ -325,12 +326,11 @@
 
 (defn get-media-item-handler [{:keys [db]}]
   (fn [req]
-    (let [item-id (get-in req [:parameters :path :id])
-          item    (db/get-media-item db item-id)]
+    (let [item-id   (get-in req [:parameters :path :id])
+          item      (db/get-media-item db item-id)
+          qualified (when item (unqualify-keys item))]
       (if item
-        {:status 200 :body (-> item
-                                unqualify-keys
-                                (assoc :name (display-title-for-item item)))}
+        {:status 200 :body (assoc qualified :name (display-title-for-item qualified))}
         {:status 404 :body {:error "Media item not found"}}))))
 
 (defn get-media-item-children-handler [{:keys [db]}]
