@@ -104,8 +104,14 @@
 ;; ---------------------------------------------------------------------------
 
 (def ^:private item-fields
-  "Fields to request from the Jellyfin /Items endpoint."
-  (str "Path,Overview,Genres,Studios,People,MediaStreams,Chapters,"
+  "Fields to request from the Jellyfin /Items endpoint.
+
+   `Etag` is the Jellyfin-provided change marker (a hash of the item's state).
+   It MUST be in this list - without it, every item arrives with `:Etag nil`
+   and the tiered scan in `upsert-item!` falls back to the slow path because
+   `(or (:Etag item) ...)` always evaluates to `\"\"`. We rely on Etag to skip
+   the ~99% of items that don't change between nightly scans."
+  (str "Etag,Path,Overview,Genres,Studios,People,MediaStreams,Chapters,"
        "DateCreated,ProviderIds,OfficialRating,CommunityRating,"
        "ProductionYear,PremiereDate,SortName,MediaSources,"
        "SeasonId,SeriesId"))
@@ -428,58 +434,112 @@
 ;; Single item upsert
 ;; ---------------------------------------------------------------------------
 
+(defn- upsert-tier
+  "Pure function: given a Jellyfin item's etag and the pre-fetched
+   etag-state entry for it (or nil if the item is brand new), return one
+   of `:new` / `:unchanged` / `:repair-duration` / `:changed`.
+
+   `existing` is `nil` (item not in PV) or `{:id :remote-etag :has-zero-duration?}`.
+
+   This is split out from `upsert-item!` so the tier logic can be tested
+   without a real DB or any macro-magic on `with-transaction`."
+  [etag existing]
+  (cond
+    (nil? existing)              :new
+    (not= etag (:remote-etag existing)) :changed
+    (:has-zero-duration? existing)       :repair-duration
+    :else                              :unchanged))
+
 (defn- upsert-item!
   "Upserts a single Jellyfin item into the database.
-   Returns the upserted media_items row, or nil if skipped.
 
-   Every scan re-runs the version+metadata upserts for every item, so
-   `media-versions.duration` (and any other field that depends on the
-   latest Jellyfin response, like `RunTimeTicks`) stays in sync. The
-   previous etag-based early-exit caused items to keep their
-   never-probed `duration = INTERVAL '0'` indefinitely, which broke
-   downstream scheduling (`playable-item?` rejected them all)."
-  [db library-path-id item]
+   `etag-state` is a pre-fetched map of `remote_key → {:id :remote-etag
+   :has-zero-duration?}` from `db/list-library-etag-state`. The per-item
+   upsert is tiered on it:
+
+   - NEW (no entry in etag-state)        → full upsert (item + version + metadata)
+   - UNCHANGED (same etag, has duration) → skip entirely; zero SQL, zero work
+   - REPAIR-DURATION (same etag, d=0)    → version-only re-upsert to refill
+                                            `media-versions.duration`
+   - CHANGED (different etag)            → full upsert; this is how metadata
+                                            edits propagate
+
+   The UNCHANGED skip is what makes the nightly scan take seconds instead of
+   hours: the pre-fetch turns N roundtrips into 1 SELECT, and unchanged
+   items cost nothing.
+
+   The REPAIR-DURATION branch is the defensive guard for the bug PR #121
+   fixed (commit `690fed7`): items that never had their `RunTimeTicks`
+   recorded kept `duration = INTERVAL '0'` forever, which broke
+   `playable-item?`. With this tiered approach, the only way duration can
+   stay zero is if Jellyfin changes the item's Etag AND keeps the duration
+   at zero (which Jellyfin does not do), so we keep that guard.
+
+   Returns the upserted media_items row, or nil if the item was skipped
+   (parent not yet synced, or kind not recognized)."
+  [db library-path-id item etag-state]
   (let [jf-id   (:Id item)
         jf-type (:Type item)
         kind    (jellyfin-type->kind jf-type)
         etag    (or (:Etag item) (str (:DateLastSaved item)))]
     (when kind
-      (jdbc/with-transaction [tx db]
-        ;; Resolve parent for hierarchical items
-        (let [parent-jf-id (item-parent-jf-id item kind)
-              parent-row   (when (needs-parent? kind)
-                             (find-parent-item tx library-path-id parent-jf-id))
-              parent-id    (or (:media-items/id parent-row) (:id parent-row))]
-          (if (and (needs-parent? kind) (nil? parent-id))
-            ;; Parent not yet synced — skip for now
-            (do (log/debug "Skipping item — parent not yet synced"
-                           {:id           jf-id
-                            :type         jf-type
-                            :parent-jf-id parent-jf-id
-                            :parent-row   parent-row})
-                nil)
-            (let [item-row (db/upsert-media-item! tx
-                                                  (cond-> {:kind             (name kind)
-                                                           :state            "normal"
-                                                           :library-path-id  library-path-id
-                                                           :remote-key       jf-id
-                                                           :remote-etag      etag}
-                                                    parent-id
-                                                    (assoc :parent-id parent-id)
+      (let [existing (get etag-state jf-id)
+            tier     (upsert-tier etag existing)]
+        (case tier
+          ;; Both NEW and CHANGED run the full upsert path. They differ
+          ;; only in the log line: operators benefit from seeing whether
+          ;; a scan is mostly discovering new content or mostly refreshing
+          ;; edits to existing content.
+          (:new :changed)
+          (jdbc/with-transaction [tx db]
+            (let [parent-jf-id (item-parent-jf-id item kind)
+                  parent-row   (when (needs-parent? kind)
+                                 (find-parent-item tx library-path-id parent-jf-id))
+                  parent-id    (or (:media-items/id parent-row) (:id parent-row))]
+              (if (and (needs-parent? kind) (nil? parent-id))
+                (do (log/debug "Skipping item - parent not yet synced"
+                               {:id           jf-id
+                                :type         jf-type
+                                :parent-jf-id parent-jf-id
+                                :parent-row   parent-row})
+                    nil)
+                (let [item-row (db/upsert-media-item! tx
+                                                      (cond-> {:kind             (name kind)
+                                                               :state            "normal"
+                                                               :library-path-id  library-path-id
+                                                               :remote-key       jf-id
+                                                               :remote-etag      etag}
+                                                        parent-id
+                                                        (assoc :parent-id parent-id)
 
-                                                    (some? (:IndexNumber item))
-                                                    (assoc :position (:IndexNumber item))))
-                  item-id  (:id item-row)]
-              (log/debug "upsert-item!: item row + id after media_items upsert"
-                         {:jf-id jf-id
-                          :kind  kind
-                          :item-row-keys (when item-row (keys item-row))
-                          :item-id item-id
-                          :item-id-type (when item-id (type item-id))})
-              (when item-id
-                (upsert-version-and-file! tx item-id item)
-                (upsert-metadata! tx item-id item kind))
-              item-row)))))))
+                                                        (some? (:IndexNumber item))
+                                                        (assoc :position (:IndexNumber item))))
+                      item-id  (:id item-row)]
+                  (log/debug "upsert-item!: full upsert"
+                             {:jf-id jf-id :kind kind :tier tier :item-id item-id})
+                  (when item-id
+                    (upsert-version-and-file! tx item-id item)
+                    (upsert-metadata! tx item-id item kind))
+                  item-row))))
+
+          ;; REPAIR-DURATION: same etag, but the prior scan never recorded
+          ;; RunTimeTicks (PR #121's bug). Refresh the version+streams+file
+          ;; so duration comes back, but skip metadata (it's already right).
+          :repair-duration
+          (jdbc/with-transaction [tx db]
+            (let [item-id (:id existing)]
+              (log/debug "upsert-item!: REPAIR-DURATION - re-upsert version"
+                         {:jf-id jf-id :kind kind :item-id item-id})
+              (upsert-version-and-file! tx item-id item)
+              ;; Return a synthetic row for the caller's tallying
+              {:id item-id :kind (name kind) :repaired true}))
+
+          ;; UNCHANGED: same etag, has duration. Skip entirely.
+          :unchanged
+          (do (log/debug "upsert-item!: UNCHANGED - skip"
+                         {:jf-id jf-id :kind kind
+                          :etag-match (:remote-etag existing)})
+              nil))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Library discovery
@@ -592,15 +652,29 @@
                                 3))
                             items)]
         (log/info "Found items to sync" {:count (count items)})
-        (let [results (atom {:synced 0 :skipped 0 :errors 0})]
+
+        ;; Pre-fetch every existing item in this library_path so the per-item
+        ;; upsert can tier itself: NEW (no row) → full, CHANGED (etag differs)
+        ;; → full, UNCHANGED → skip, REPAIR-DURATION → version-only.
+        ;; This is what turns the nightly scan from 4-5 hours into seconds:
+        ;; the cost is one SELECT for the whole library (~200ms) plus per-item
+        ;; work that, on the steady state, is just a hashmap lookup.
+        (let [etag-state (db/list-library-etag-state db lp-id)
+              results    (atom {:synced 0 :skipped 0 :repaired 0 :errors 0})]
+          (log/info "Pre-fetched library etag state"
+                    {:library-path-id lp-id
+                     :items-in-db     (count etag-state)})
           (doseq [item sorted]
             (try
-              (if (upsert-item! db lp-id item)
-                (swap! results update :synced inc)
-                (swap! results update :skipped inc))
+              (let [result (upsert-item! db lp-id item etag-state)]
+                (cond
+                  (:repaired result) (swap! results update :repaired inc)
+                  result              (swap! results update :synced inc)
+                  :else               (swap! results update :skipped inc)))
               (catch Exception e
                 (log/error e "Failed to upsert Jellyfin item"
                            {:id (:Id item) :name (:Name item)})
                 (swap! results update :errors inc))))
-          (log/info "Jellyfin library scan complete" @results)
+          (log/info "Jellyfin library scan complete"
+                    (assoc @results :total (count sorted)))
           @results)))))

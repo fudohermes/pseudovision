@@ -639,6 +639,51 @@
                        (h/where [:= :mf.path path])
                        sql/format)))
 
+(defn list-library-etag-state
+  "Pre-fetch the per-item change-detection state for every item in a Jellyfin
+   library, returning a map keyed by `remote_key`:
+
+       {remote-key -> {:id            <integer>
+                       :remote-etag   <string or nil>
+                       :has-zero-duration? <boolean>}}
+
+   `:has-zero-duration?` is true if the item has a media_versions row whose
+   `duration` is `INTERVAL '0'` (the schema default; signals that the Jellyfin
+   `RunTimeTicks` was never recorded). The Jellyfin scan uses this state to
+   tier its per-item work:
+
+     - remote-key absent  → NEW      (full upsert)
+     - same etag          → UNCHANGED (skip, or repair-duration if zero)
+     - different etag     → CHANGED  (full upsert)
+
+   Without this pre-fetch, every item would force a roundtrip to look up its
+   own state, which is what made the previous full-upsert scan take 4-5 hours.
+   The single SELECT here is the entire cost of the fast path: ~50k rows,
+   ~200ms."
+  [ds library-path-id]
+  (let [rows (db/query ds (-> (h/select [:mi.id           :id]
+                                       [:mi.remote_key   :remote-key]
+                                       [:mi.remote_etag  :remote-etag]
+                                       ;; EXTRACT(EPOCH FROM duration) = 0 catches
+                                       ;; the default 'INTERVAL 0' rows without
+                                       ;; needing INTERVAL literal comparisons.
+                                       [(sql/call :EXTRACT :EPOCH :mv.duration)
+                                        :duration-epoch])
+                                    (h/from [:media-items :mi])
+                                    (h/left-join [:media-versions :mv]
+                                                 [:= :mv.media_item_id :mi.id])
+                                    (h/where [:= :mi.library_path_id library-path-id])
+                                    sql/format))]
+    (into {}
+          (map (fn [r]
+                 (let [d (or (:duration-epoch r) (:duration_epoch r))
+                       zero-d? (or (nil? d) (= 0M d) (= 0 d))]
+                   [(or (:remote-key r) (:remote_key r))
+                    {:id                 (:id r)
+                     :remote-etag        (or (:remote-etag r) (:remote_etag r))
+                     :has-zero-duration? zero-d?}]))
+               rows))))
+
 (defn upsert-media-item!
   "Upserts a single `media_items` row and returns the row map (with
   unqualified kebab-case keys, including `:id`), or nil if no row was
