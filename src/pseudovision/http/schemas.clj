@@ -391,6 +391,15 @@
    [:connection-config  {:optional true} [:map]]
    [:path-replacements  {:optional true} [:sequential [:map]]]])
 
+(def MediaSourceUpdate
+  [:map
+   [:name               {:optional true} :string]
+   [:api-key            {:optional true} :string]
+   [:connections        {:optional true} [:sequential [:map
+                                                      [:uri :string]
+                                                      [:is-active {:optional true} :boolean]]]]
+   [:path-replacements  {:optional true} [:sequential [:map]]]])
+
 (def MediaLibrary
   [:map
    [:id              LibraryId]

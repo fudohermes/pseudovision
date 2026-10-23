@@ -182,6 +182,11 @@
    ["/api/media/sources/:id"
     {:tags       ["media"]
      :parameters {:path [:map [:id s/MediaSourceId]]}
+     :put    {:summary    "Update a media source"
+              :parameters {:body s/MediaSourceUpdate}
+              :responses  {200 {:body s/MediaSource}
+                           404 {:body s/APIError}}
+              :handler    (med/update-source-handler ctx)}
      :delete {:summary   "Delete a media source"
               :responses {204 {}}
               :handler   (med/delete-source-handler ctx)}}]

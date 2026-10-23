@@ -329,7 +329,7 @@
                    (emit-flood db cursor slot channel playout-id
                                (assoc opts :flood-end flood-end)))
           (do (log/warn "Unknown fill mode, skipping slot" {:fill fill})
-              [[] cursor])))))
+              [[] cursor]))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Public API

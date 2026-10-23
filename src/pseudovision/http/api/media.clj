@@ -51,6 +51,21 @@
       (db/delete-media-source! db source-id)
       {:status 204 :body nil})))
 
+(defn update-source-handler [{:keys [db]}]
+  (fn [req]
+    (let [source-id (get-in req [:parameters :path :id])
+          params    (get-in req [:parameters :body])
+          existing  (db/get-media-source db source-id)
+          config    (when-let [new-config (conn/->connection-config params)]
+                      (merge (:media-sources/connection-config existing) new-config))
+          attrs     (-> (select-keys params [:name :path-replacements])
+                        (cond-> config (assoc :connection-config config)))]
+      (if (nil? existing)
+        {:status 404 :body {:error "Media source not found"}}
+        (if-let [s (db/update-media-source! db source-id attrs)]
+          {:status 200 :body (unqualify-keys s)}
+          {:status 404 :body {:error "Media source not found"}})))))
+
 (defn list-all-libraries-handler [{:keys [db]}]
   (fn [_req] {:status 200 :body (mapv unqualify-keys (db/list-libraries db))}))
 

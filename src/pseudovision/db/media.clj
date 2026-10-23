@@ -41,6 +41,18 @@
     (log/info "Deleted media source" {:source-id id})
     result))
 
+(defn update-media-source! [ds id attrs]
+  (let [prepared (cond-> attrs
+                   (:kind attrs)               (update :kind #(sql-util/->pg-enum "media_source_kind" %))
+                   (:connection-config attrs)  (update :connection-config sql-util/->jsonb)
+                   (:path-replacements attrs)  (update :path-replacements sql-util/->jsonb))
+        result (db/execute-one! ds (-> (h/update :media-sources)
+                                       (h/set prepared)
+                                       (h/where [:= :id id])
+                                       sql/format))]
+    (log/info "Updated media source" {:source-id id})
+    result))
+
 (defn list-libraries [ds]
   (db/query ds (-> (h/select :*)
                    (h/from :libraries)

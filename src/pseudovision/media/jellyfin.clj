@@ -57,7 +57,7 @@
   (try
     (let [url  (str base-url path)
           resp (http/get url
-                         {:headers          {"X-Emby-Token" api-key}
+                         {:headers          {"Authorization" (str "MediaBrowser Token=\"" api-key "\"")}
                           :query-params     query-params
                           :as               :json
                           :throw-exceptions false
