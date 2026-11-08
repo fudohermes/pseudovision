@@ -347,20 +347,27 @@
 (defn- program-tags
   "metadata_tags names for a Grout program: its freeform Grout tags (with
    Grout-internal intake/audit tags filtered out — see
-   `grout-internal-tag?`), plus a synthesized `channel:<slug>` tag from the
-   clip's `channel` column so the item lands in the right channel's catalog
-   slice. Tags are passed through verbatim otherwise (an already-`genre:`-
-   prefixed tag flows straight into the catalog's genre aggregate; a bare tag
-   is still matchable by `random:<tag>`). Deduped; blanks dropped."
+   `grout-internal-tag?`), plus a synthesized `channel:<slug>` tag for every
+   channel the clip may play on, so the item lands in each of those channels'
+   catalog slices. The channel set is the clip's `channels` array (Grout fills
+   it with several values when a directory profile assigns a folder to more
+   than one channel) unioned with the legacy singular `channel` column, which
+   older Grout builds send alone. Reading only `channel` dropped every channel
+   after the first, so a folder shared by two channels only ever reached one.
+   Tags are passed through verbatim otherwise (an already-`genre:`-prefixed
+   tag flows straight into the catalog's genre aggregate; a bare tag is still
+   matchable by `random:<tag>`). Deduped; blanks dropped."
   [clip]
-  (let [base     (->> (:tags clip)
-                      (filter string?)
-                      (map str/trim)
-                      (remove str/blank?)
-                      (remove grout-internal-tag?))
-        chan     (:channel clip)
-        chan-tag (when-not (str/blank? chan) (str "channel:" (tags/kebab-case chan)))]
-    (->> (cond-> (vec base) chan-tag (conj chan-tag))
+  (let [base      (->> (:tags clip)
+                       (filter string?)
+                       (map str/trim)
+                       (remove str/blank?)
+                       (remove grout-internal-tag?))
+        chan-tags (->> (cons (:channel clip) (:channels clip))
+                       (filter string?)
+                       (remove str/blank?)
+                       (map #(str "channel:" (tags/kebab-case %))))]
+    (->> (concat base chan-tags)
          distinct
          vec)))
 

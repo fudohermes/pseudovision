@@ -169,6 +169,19 @@
   (is (= ["channel:britannia"]
          (#'sut/program-tags {:tags ["channel:britannia"] :channel "britannia"}))))
 
+(deftest program-tags-emits-every-channel
+  (testing "a multi-channel clip gets a channel tag per entry in :channels"
+    (is (= ["documentary" "channel:infobytes" "channel:muse"]
+           (#'sut/program-tags {:tags     ["documentary"]
+                                :channel  "infobytes"
+                                :channels ["infobytes" "muse"]}))))
+  (testing ":channels alone (no legacy :channel) still tags"
+    (is (= ["channel:tasty"]
+           (#'sut/program-tags {:tags [] :channels ["tasty" "" nil]}))))
+  (testing "a null :channels falls back to the singular column"
+    (is (= ["channel:chronicles"]
+           (#'sut/program-tags {:tags [] :channel "chronicles" :channels nil})))))
+
 (deftest program-tags-filters-grout-internal-tags
   (testing "parent-directory:, filename:, content-type: are intake/audit leaks — never mirror them"
     ;; The "real" tags are educational / history / etc; the noisy ones

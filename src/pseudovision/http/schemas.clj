@@ -47,6 +47,15 @@
    [:limit  {:optional true} [:int {:min 1 :max 1000 :description "Maximum number of items to return (default varies by endpoint)"}]]
    [:offset {:optional true} [:int {:min 0 :description "Number of items to skip (default: 0)"}]]])
 
+(def TagFacetQuery
+  "Query parameters for GET /api/tags: pagination plus optional facet filters."
+  [:map
+   [:limit      {:optional true} [:int {:min 1 :max 1000 :description "Maximum number of tags to return (default 100)"}]]
+   [:offset     {:optional true} [:int {:min 0 :description "Number of tags to skip (default: 0)"}]]
+   [:prefix     {:optional true} [:string {:description "Only tags starting with this prefix, case-insensitive (e.g. channel: or genre:)"}]]
+   [:library-id {:optional true} [:int {:description "Only count tags on media items in this library"}]]
+   [:kind       {:optional true} [:string {:description "Only count tags on media items of this kind (e.g. program, episode, movie)"}]]])
+
 (def CursorPaginationQuery
   "Query parameters for cursor-based pagination (time-series data)."
   [:map
