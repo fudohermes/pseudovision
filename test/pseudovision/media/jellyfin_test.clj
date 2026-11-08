@@ -49,12 +49,13 @@
       (is (re-find #"(?i)SELECT.*mi\.id" sql))
       (is (re-find #"(?i)mi\.remote_key" sql))
       (is (re-find #"(?i)mi\.remote_etag" sql))
-      ;; HoneySQL renders `(sql/call :EXTRACT :EPOCH :mv.duration)` as
-      ;; `EXTRACT(EPOCH, mv.duration)` (function-call syntax). The semantics
-      ;; are identical to the canonical `EXTRACT(EPOCH FROM duration)`
-      ;; form, but the rendered commas mean our regex needs to be lenient.
-      (is (re-find #"(?i)EXTRACT\s*\(\s*EPOCH\s*,\s*mv\.duration\s*\)" sql)
-          "EXTRACT(EPOCH, mv.duration) gives us a numeric comparison target"))))
+      ;; PostgreSQL's EXTRACT grammar requires `EPOCH FROM <source>` - there
+      ;; is no EXTRACT(EPOCH, x) function-call form. HoneySQL renders
+      ;; `(sql/call :EXTRACT :EPOCH :mv.duration)` with argument commas,
+      ;; which is a syntax error in production (scan-all failure, 2026-11),
+      ;; so the query must render the canonical FROM form via a raw fragment.
+      (is (re-find #"(?i)EXTRACT\s*\(\s*EPOCH\s+FROM\s+mv\.duration\s*\)" sql)
+          "EXTRACT(EPOCH FROM mv.duration) - canonical PG grammar"))))
 
 (deftest list-library-etag-state-builds-map-keyed-by-remote-key
   (testing "result rows are keyed by remote_key with :id, :remote-etag, :has-zero-duration?"
