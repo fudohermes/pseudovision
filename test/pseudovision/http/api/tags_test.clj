@@ -30,6 +30,39 @@
         (is (= "comedy" (get-in body [:items 0 :name])))
         (is (= 12      (get-in body [:items 0 :count])))))))
 
+(deftest list-tags-applies-facet-filters
+  (testing "GET /api/tags?prefix=&library-id=&kind= scopes both queries"
+    (let [seen (atom [])]
+      (with-redefs [pseudovision.db.core/query
+                    (fn [_ q] (swap! seen conj q)
+                      [{:metadata-tags/name "channel:muse" :count 7}])
+                    pseudovision.db.core/query-one
+                    (fn [_ q] (swap! seen conj q) {:count 1})]
+        (let [resp ((make-test-handler)
+                    (mock/request :get "/api/tags?prefix=Channel:&library-id=49&kind=program"))
+              body (parse-json-body resp)]
+          (is (= 200 (:status resp)))
+          (is (= "channel:muse" (get-in body [:items 0 :name])))
+          (is (= 2 (count @seen)))
+          (doseq [[sql-str & params] @seen]
+            (is (re-find #"(?i)starts_with" sql-str))
+            (is (re-find #"(?i)library_paths" sql-str))
+            (is (some #{"channel:"} params))
+            (is (some #{49} params))
+            (is (some #{"program"} params))))))))
+
+(deftest list-tags-unfiltered-skips-joins
+  (testing "with no filters the listing stays a single-table query"
+    (let [seen (atom [])]
+      (with-redefs [pseudovision.db.core/query
+                    (fn [_ q] (swap! seen conj q) [])
+                    pseudovision.db.core/query-one
+                    (fn [_ q] (swap! seen conj q) {:count 0})]
+        ((make-test-handler) (mock/request :get "/api/tags"))
+        (doseq [[sql-str] @seen]
+          (is (not (re-find #"(?i)join" sql-str)))
+          (is (not (re-find #"(?i)where" sql-str))))))))
+
 (deftest add-tags-rejects-missing-tags-key
   (testing "POST /api/media-items/1/tags with no :tags key returns 400"
     (let [resp ((make-test-handler)

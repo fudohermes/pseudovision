@@ -528,8 +528,8 @@
    ;; ── Tags ────────────────────────────────────────────────────────────────
    ["/api/tags"
     {:tags ["tags"]
-     :get {:summary   "List all tags with usage counts (paginated)"
-           :parameters {:query s/PaginationQuery}
+     :get {:summary   "List tags with usage counts (paginated), optionally by prefix, library and kind"
+           :parameters {:query s/TagFacetQuery}
            :responses {200 {:body s/PaginatedTags}}
            :handler   (tags/list-all-tags-handler ctx)}}]
    ["/api/media-items/:id/tags"

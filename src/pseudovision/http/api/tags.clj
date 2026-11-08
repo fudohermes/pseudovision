@@ -3,7 +3,8 @@
 
    Tags are stored in metadata_tags table and enable flexible content
    selection in schedule slots via required_tags/excluded_tags filters."
-  (:require [pseudovision.db.core       :as db-core]
+  (:require [clojure.string             :as str]
+            [pseudovision.db.core       :as db-core]
             [pseudovision.util.pagination :as pagination]
             [honey.sql.helpers :as h]
             [honey.sql :as sql]
@@ -95,23 +96,53 @@
       (log/info "Deleted tag from media item" {:item-id item-id :tag tag})
       {:status 204 :body nil})))
 
+(defn- tag-facet-base
+  "FROM/JOIN/WHERE shared by the tag listing and its total count. `prefix`
+   narrows to one tag namespace (e.g. \"channel:\" or \"genre:\"),
+   case-insensitively. `library-id` and `kind` scope the counts to one
+   library and/or one media item kind, so a caller can ask \"which channel
+   tags do the Grout programs actually carry?\" instead of assuming a fixed
+   vocabulary. The media item joins are only added when one of those two
+   filters is set, so the plain listing stays a single-table scan."
+  [{:keys [prefix library-id kind]}]
+  (let [scoped? (or library-id kind)
+        conds   (cond-> []
+                  prefix     (conj [:starts_with [:lower :mt.name] (str/lower-case prefix)])
+                  library-id (conj [:= :lp.library-id library-id])
+                  kind       (conj [:= [:cast :mi.kind :text] kind]))]
+    (cond-> (h/from [:metadata-tags :mt])
+      scoped?     (h/join [:metadata :m]       [:= :m.id :mt.metadata-id]
+                          [:media-items :mi]   [:= :mi.id :m.media-item-id]
+                          [:library-paths :lp] [:= :lp.id :mi.library-path-id])
+      (seq conds) (h/where (into [:and] conds)))))
+
 (defn list-all-tags-handler
-  "GET /api/tags — list all unique tags with usage counts."
+  "GET /api/tags - list unique tags with usage counts, most used first.
+
+   Optional filters (all ANDed, all optional): `prefix` (a tag namespace such
+   as `channel:`), `library-id`, and `kind` (media item kind, e.g. `program`).
+   This is the tag facet: it reports the vocabulary that actually exists, so
+   curation and UIs can discover tags and then query on them rather than
+   guessing at names."
   [{:keys [db]}]
   (fn [req]
     (let [qp     (get-in req [:parameters :query])
           limit  (or (:limit qp) 100)
           offset (or (:offset qp) 0)
+          filters {:prefix     (not-empty (:prefix qp))
+                   :library-id (:library-id qp)
+                   :kind       (not-empty (:kind qp))}
+          base   (tag-facet-base filters)
           ;; Count total unique tags
-          total-result (db-core/query-one db (-> (h/select [:%count.distinct.name])
-                                                 (h/from :metadata-tags)
+          total-result (db-core/query-one db (-> base
+                                                 (h/select [[:count [:distinct :mt.name]] :count])
                                                  sql/format))
           total  (or (:count total-result) 0)
           ;; Fetch paginated tags
-          tags   (db-core/query db (-> (h/select :name [:%count.*])
-                                       (h/from :metadata-tags)
-                                       (h/group-by :name)
-                                       (h/order-by [:count :desc] :name)
+          tags   (db-core/query db (-> base
+                                       (h/select :mt.name [:%count.* :count])
+                                       (h/group-by :mt.name)
+                                       (h/order-by [:count :desc] :mt.name)
                                        (h/limit limit)
                                        (h/offset offset)
                                        sql/format))

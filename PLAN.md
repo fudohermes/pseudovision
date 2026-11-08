@@ -119,6 +119,9 @@ Grout clips over HTTP instead of a shared mount; merging pvcli and
   while `*.sea.fudo.link` is local-only behind NAT.
 - The Grout media source is created lazily on first ingest without a unique
   constraint, so concurrent first builds could create duplicates.
+- Gap filler with no preset (`grout-channel-fallback`) asks Grout for any
+  non-bumper clip that fits, so long-form `program` items can land in a tail
+  gap as filler. Decide whether the fallback should ask for `kind=filler` only.
 
 ## Decisions
 
