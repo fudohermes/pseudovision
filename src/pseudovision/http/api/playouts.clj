@@ -115,8 +115,8 @@
    ?horizon days from now (default 7), preserving the events already scheduled
    in the near term and advancing each show's rotation. Idempotent — a channel
    already covered past the horizon is left untouched — so this is safe to call
-   on a daily cron to guarantee upcoming content. Channels populated only via
-   the DailySlot ingest stream (no attached schedule) are skipped.
+   on a daily cron to guarantee upcoming content. Channels with no attached
+   schedule are skipped.
 
    Like the per-channel rebuild this can take a while, so it runs as an async
    job: returns 202 with the job record; poll GET /api/jobs/:job-id for the

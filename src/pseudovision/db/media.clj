@@ -431,12 +431,10 @@
 ;; ---------------------------------------------------------------------------
 ;; Season-aware / tag-scoped playable resolution
 ;;
-;; Shared by the daily-slots ingest (pseudovision.http.api.daily-slots) and the
-;; native scheduling engine's collection resolver (pseudovision.db.collections)
-;; so "all episodes of show X" and "all episodes matching genre tag Y" are
-;; resolved identically everywhere, instead of maintaining two copies of the
-;; season-traversal / parent-tag-inheritance logic that previously only lived
-;; in daily-slots.clj.
+;; Used by the native scheduling engine's collection resolver
+;; (pseudovision.db.collections) and the scheduling engine itself, so "all
+;; episodes of show X" and "all episodes matching genre tag Y" are resolved the
+;; same way everywhere.
 ;; ---------------------------------------------------------------------------
 
 (defn list-show-episodes-by-id
@@ -567,8 +565,8 @@
    `:require-tags` (optional) — exact tag strings (e.g. `channel:hua`) the
    top-level item must ALSO carry, ANDed with the category match. Used to
    scope a category pool to one channel's own mapped media, same as the
-   `channel-tag` scoping `publish-daily-slots!` applies to `random:<category>`
-   pools today.
+   `channel-tag` scoping of `auto:category:<cat>:<channel-tag>` smart
+   collections.
 
    Each row carries `:_top-id` — the id of the top-level item (show or movie)
    it was resolved from — for show-level tag lookups downstream.
@@ -578,7 +576,7 @@
    uses `next.jdbc`'s `as-kebab-maps`, which qualifies every column — even an
    aliased one — by its *source table* and turns `_`→`-`, so a raw
    `[:top.id :_top-id]` alias would surface as `:media-items/-top-id`, never
-   the bare `:_top-id` that `daily-slots/top-id-of` reads. (This is the same
+   the bare `:_top-id` that downstream show-level tag lookups read. (This is the same
    behaviour that makes the `[:mvp.duration :duration]` alias arrive as
    `:media-versions/duration`.) When the alias silently missed, every episode
    fell back to its own id, show-level tags like `channel:<slug>` were never

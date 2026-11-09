@@ -24,7 +24,6 @@
             [pseudovision.http.api.metrics    :as metrics]
              [pseudovision.http.api.jobs       :as jobs]
              [pseudovision.http.api.catalog    :as catalog]
-             [pseudovision.http.api.daily-slots :as ds]
              [pseudovision.http.api.grout      :as grout-api]
              [pseudovision.ffmpeg.profile      :as profile]))
 
@@ -481,20 +480,9 @@
     ["/api/sync/grout"
      {:tags ["sync"]
       :post {:summary    "Sync Grout long-form content into the catalog"
-             :description "Pulls every `program`-kind item from Grout and upserts it as a program media item with metadata + tags, so it is visible to the catalog aggregate and schedulable via daily-slots. Idempotent and best-effort (a no-op when Grout is disabled)."
+             :description "Pulls every `program`-kind item from Grout and upserts it as a program media item with metadata + tags, so it is visible to the catalog aggregate and schedulable by the native engine. Idempotent and best-effort (a no-op when Grout is disabled)."
              :responses  {200 {:body s/GroutSyncResult}}
              :handler    (grout-api/sync-grout-handler ctx)}}]
-
-    ;; ── Daily Slots (Tunabrain expander output) ────────────────────────────
-    ["/api/channels/:channel-id/daily-slots"
-     {:tags       ["daily-slots"]
-      :parameters {:path [:map [:channel-id s/ChannelId]]}
-      :post       {:summary    "Ingest expanded DailySlot[] from Tunarr Scheduler"
-                   :description "Resolves media_id + media_selection_strategy into concrete playout events for the channel."
-                   :parameters {:body [:vector s/DailySlot]}
-                   :responses  {200 {:body s/DailySlotIngestResult}
-                                404 {:body s/APIError}}
-                   :handler    (ds/ingest-daily-slots-handler ctx)}}]
 
     ;; ── Filler Presets ───────────────────────────────────────────────────────
    ["/api/filler-presets"

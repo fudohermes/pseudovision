@@ -1044,28 +1044,6 @@
    [:runtime_histogram  [:vector RuntimeBucket]]
    [:generated_at       {:optional true} [:maybe :string]]])
 
-;; ---------------------------------------------------------------------------
-;; DailySlot — expanded slot from Tunabrain expander
-;; ---------------------------------------------------------------------------
-
-(def DailySlot
-  "Concrete slot produced by the deterministic expander."
-  [:map
-   [:start-time                :string]
-   [:end-time                  :string]
-   [:media-id                  {:optional true} [:maybe :string]]
-   [:media-selection-strategy  {:optional true} [:enum "random" "sequential" "specific"]]
-   [:category-filters          {:optional true} [:vector :string]]
-   [:notes                     {:optional true} [:vector :string]]])
-
-(def DailySlotIngestResult
-  "Result of bulk-ingesting DailySlots into a channel."
-  [:map
-   [:ingested        :int]
-   [:skipped         :int]
-   [:errors          [:vector :string]]
-   [:channel_id      :int]])
-
 (def GroutSyncResult
   "Result of a Grout long-form content sync. `enabled` is false (with zero
    counts) when GROUT_URL is unset. `synced` counts newly ingested programs,

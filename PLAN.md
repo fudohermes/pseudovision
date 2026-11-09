@@ -56,8 +56,6 @@ Grout clips over HTTP instead of a shared mount; merging pvcli and
 - [ ] Support TS applying monthly overrides as date-bounded manual events for
       each override window (manual events already survive rebuilds; check that
       the engine resumes cleanly after an override window ends).
-- [ ] Delete `http/api/daily_slots.clj` and
-      `POST /api/channels/:id/daily-slots` once TS stops calling it.
 
 ### Dead code (ecosystem step 3)
 

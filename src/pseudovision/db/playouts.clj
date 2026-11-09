@@ -23,9 +23,8 @@
 
 (defn list-playouts-with-schedule
   "All playouts that have a schedule attached (schedule_id IS NOT NULL) — the
-   channels the build engine can (re)generate. Playouts populated purely from
-   the DailySlot ingest stream (no attached schedule) carry no schedule_id and
-   are therefore skipped: PV can't rebuild them itself. Ordered by channel_id
+   channels the build engine can (re)generate. Playouts with no attached schedule
+   are skipped: PV has nothing to build them from. Ordered by channel_id
    for a stable, repeatable iteration."
   [ds]
   (db/query ds (-> (h/select :*)

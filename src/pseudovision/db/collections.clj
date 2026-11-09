@@ -58,7 +58,7 @@
   ;; Supported config keys (all optional; :show-id and :category are checked
   ;; first and, when present, short-circuit the rest — they resolve through
   ;; pseudovision.db.media's season-aware / tag-inheritance-aware queries
-  ;; (shared with the daily-slots ingest path) instead of the flat query below,
+  ;; instead of the flat query below,
   ;; which only matches tags on the row's OWN metadata and cannot express
   ;; "all episodes of show X" or "all episodes whose SHOW carries genre Y"):
   ;;   :show-id        — internal id of a show; resolves to its ordered,

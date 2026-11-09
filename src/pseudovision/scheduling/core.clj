@@ -1099,8 +1099,8 @@
   "Top up EVERY schedule-backed channel's playout timeline to at least
    `horizon-days` from now (see ensure-horizon!).  This is the bulk daily entry
    point: one call keeps all channels stocked with upcoming content, preserving
-   near-term events and rotation.  Channels with no attached schedule (populated
-   only via the DailySlot ingest stream) are skipped — PV can't rebuild those.
+   near-term events and rotation.  Channels with no attached schedule are skipped,
+   since PV has nothing to build them from.
 
    `opts` (optional) is merged into each channel's build options (notably
    :grout).  Per-channel failures are isolated: one channel erroring does not
