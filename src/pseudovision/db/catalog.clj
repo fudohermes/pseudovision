@@ -215,6 +215,14 @@
 ;; Genre aggregates
 ;; ---------------------------------------------------------------------------
 
+;; Playable-item count for a tag/genre aggregate. A show contributes its
+;; episodes; a movie or program is itself one playable item. Summing only the
+;; episode lateral counted every movie and Grout program as 0, so a category
+;; made of 737 programs reported episode_count 6 and feasibility flagged it as
+;; a tiny pool while the build-time resolver found the full set.
+(def ^:private episode-count-sql
+  "SUM(CASE WHEN mi.kind = 'show' THEN COALESCE(e.count, 0) ELSE 1 END)::int")
+
 (defn list-genre-aggregates
   "Returns a seq of {:genre, :show_count, :episode_count}.
 
@@ -225,12 +233,13 @@
 
    Optional `tag-filter` limits to items with that tag.
    A show is counted for a genre if its metadata carries that genre.
-   Episodes are counted as children of those shows."
+   episode_count is playable items: a show's episodes, plus 1 per movie or
+   program (see `episode-count-sql`)."
   [ds tag-filter]
   (let [query
         (-> (h/select [[:raw "regexp_replace(mt.name, '^genre:', '')"] :genre]
                      [[:count [:distinct :mi.id]] :show_count]
-                      [[:raw "SUM(e.count)::int"] :episode_count])
+                      [[:raw episode-count-sql] :episode_count])
             (h/from [:metadata-tags :mt])
             (h/join [:metadata :m] [:= :m.id :mt.metadata-id])
             (h/join [:media-items :mi] [:= :mi.id :m.media-item-id])
@@ -336,12 +345,13 @@
    Optional `tag-filter` limits to items with that tag.
 
    A show is counted for a tag if its metadata carries that tag.
-   Episodes are counted as children of those shows."
+   episode_count is playable items: a show's episodes, plus 1 per movie or
+   program (see `episode-count-sql`)."
   [ds tag-filter]
   (let [query
         (-> (h/select [:mt.name :tag]
                       [[:count [:distinct :mi.id]] :show_count]
-                      [[:raw "SUM(e.count)::int"] :episode_count])
+                      [[:raw episode-count-sql] :episode_count])
             (h/from [:metadata-tags :mt])
             (h/join [:metadata :m] [:= :m.id :mt.metadata-id])
             (h/join [:media-items :mi] [:= :mi.id :m.media-item-id])

@@ -161,3 +161,26 @@
       (is (string? (first sql-params)))
       (is (re-find #"(?i)UPDATE collections" (first sql-params)))
       (is (re-find #"(?i)RETURNING \*" (first sql-params))))))
+
+;; ---------------------------------------------------------------------------
+;; resolve-playable-by-tag category matching
+;; ---------------------------------------------------------------------------
+
+(defn- capture-resolve-by-tag-sql [category]
+  (let [captured (atom nil)]
+    (with-redefs [db/query (fn [_ sql] (reset! captured sql) [])]
+      (sut/resolve-playable-by-tag nil category))
+    @captured))
+
+(deftest resolve-playable-by-tag-ignores-separator-style
+  (testing "a hyphenated category is matched against a separator-normalised tag name"
+    (let [[sql & params] (capture-resolve-by-tag-sql "dark-comedy")]
+      (is (re-find #"(?i)REGEXP_REPLACE\(LOWER\(t\.name\)" sql))
+      (is (some #{"dark-comedy"} params))
+      (is (some #{"genre:dark-comedy"} params))))
+  (testing "an underscored category reduces to the same key"
+    (let [[_ & params] (capture-resolve-by-tag-sql "Sci_Fi & Fantasy")]
+      (is (some #{"sci-fi-and-fantasy"} params))
+      (is (some #{"genre:sci-fi-and-fantasy"} params))
+      ;; the verbatim lowercase form is still tried
+      (is (some #{"sci_fi & fantasy"} params)))))

@@ -96,10 +96,15 @@
                                     "now"     (sched/rebuild-from-now! db playout-id horizon-days sched-opts)
                                     "horizon" (sched/rebuild-horizon! db playout-id 7 horizon-days sched-opts)
                                     (sched/rebuild-from-now! db playout-id horizon-days sched-opts))]
-                        {:message          "Rebuild complete"
-                         :events-generated count
-                         :horizon-days     horizon-days
-                         :from             from})))]
+                        (cond-> {:message          "Rebuild complete"
+                                 :events-generated count
+                                 :horizon-days     horizon-days
+                                 :from             from}
+                          ;; build! returns 0 without touching the playout when
+                          ;; no schedule is attached, which looked exactly like
+                          ;; "already at the horizon". Say so in the result.
+                          (nil? (:playouts/schedule-id playout))
+                          (assoc :warning "no schedule attached; nothing to build")))))]
           {:status 202 :body {:job job}})
         {:status 404 :body {:error "No playout for this channel"}}))))
 
@@ -110,8 +115,8 @@
    ?horizon days from now (default 7), preserving the events already scheduled
    in the near term and advancing each show's rotation. Idempotent — a channel
    already covered past the horizon is left untouched — so this is safe to call
-   on a daily cron to guarantee upcoming content. Channels populated only via
-   the DailySlot ingest stream (no attached schedule) are skipped.
+   on a daily cron to guarantee upcoming content. Channels with no attached
+   schedule are skipped.
 
    Like the per-channel rebuild this can take a while, so it runs as an async
    job: returns 202 with the job record; poll GET /api/jobs/:job-id for the

@@ -10,8 +10,7 @@
 
 - **Tunarr Scheduler** is the main programmatic writer: it pushes channels and
   tags, syncs each channel's frozen grid onto schedules and slots, extends
-  playout horizons, and reads `GET /api/catalog/aggregate`. It also still
-  pushes DailySlots, which is being retired.
+  playout horizons, and reads `GET /api/catalog/aggregate`.
 - **Marquee** reads almost everything and triggers rebuilds; **pvcli** reads.
 - **Grout** is called *by* PV (filler at build time, long-form via
   `POST /api/sync/grout`); it never calls PV.
@@ -26,9 +25,8 @@
   `http/core.clj` with schemas in `http/schemas.clj` so they show up in
   `/openapi.json`; don't document endpoints by hand elsewhere.
 - **The native engine is the only timeline writer** (decided 2026-10-13).
-  Don't build on `http/api/daily_slots.clj`; it's being deleted. Scheduling and
-  override work belongs in the schedule/slot engine and TS's
-  `native_schedule.clj`.
+  The DailySlot ingest is gone; scheduling and override work belongs in the
+  schedule/slot engine and TS's `native_schedule.clj`.
 - **Never return or log secrets.** Media-source `connection-config` holds the
   Jellyfin API key; responses and logs must omit it, and playback URLs go
   through PV's own `/api/media/items/:id/stream` proxy.

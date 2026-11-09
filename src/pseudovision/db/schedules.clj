@@ -94,6 +94,16 @@
                        (h/where [:= :id id])
                        sql/format)))
 
+(defn- coerce-slot-dates
+  "active_from / active_until arrive as ISO date strings; bind them as
+   LocalDate so Postgres stores DATE values."
+  [attrs]
+  (reduce (fn [m k]
+            (cond-> m
+              (string? (get m k)) (update k #(java.time.LocalDate/parse %))))
+          attrs
+          [:active-from :active-until :active_from :active_until]))
+
 (defn create-slot! [ds attrs]
   (let [;; schedule_slots.anchor defaults to 'sequential' at the DB level when
         ;; omitted, and fill_mode independently defaults to 'once' — so a slot
@@ -125,7 +135,7 @@
                     (update :guide-mode #(sql-util/->pg-enum "guide_mode" %)))
                     ;; days-of-week is a plain INTEGER — no coercion needed
         sql-map (-> (h/insert-into :schedule-slots)
-                    (h/values [processed])
+                    (h/values [(coerce-slot-dates processed)])
                     (h/returning :*)
                     sql/format)]
     (log/debug "Creating slot" {:attrs attrs :processed processed :sql sql-map})
@@ -133,7 +143,7 @@
 
 (defn update-slot! [ds id attrs]
   (db/execute-one! ds (-> (h/update :schedule-slots)
-                          (h/set (cond-> attrs
+                          (h/set (cond-> (coerce-slot-dates attrs)
                                    (:anchor attrs)
                                    (update :anchor #(sql-util/->pg-enum "slot_anchor" %))
                                    (:fill_mode attrs)

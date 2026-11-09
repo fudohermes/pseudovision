@@ -56,7 +56,7 @@ clojure -X:migrate :action rollback    # roll back one migration
 | `PSEUDOVISION_SCRATCH_DIR` | `/tmp/pseudovision/scratch` | Scratch space |
 | `GROUT_URL` | unset (Grout disabled) | Grout base URL |
 | `GROUT_MEDIA_DIR` | `/data/media/grout` | Grout's media mount, which PV must share |
-| `TZ` | `UTC` | Wall-clock zone for scheduling, EPG, and DailySlot ingest; keep it the same as TS's |
+| `TZ` | `UTC` | Wall-clock zone for scheduling and EPG; keep it the same as TS's |
 
 ## Testing
 
@@ -177,7 +177,6 @@ schemas in `http/schemas.clj`. It's authoritative; this is a map.
 | Media | `/api/media/sources`, `/api/media/libraries`, `/api/media/items/:id` (+ `/children`, `/stream`, `/playback-url`), `/api/media/collections`, `/api/media-items/:id/tags`, `/api/tags` |
 | Filler & ffmpeg | `/api/filler-presets`, `/api/ffmpeg/profiles` |
 | Catalog (for TS) | `GET /api/catalog/aggregate` (`?channel=` or `?tag=`), `POST /api/sync/grout` |
-| DailySlots (being retired) | `POST /api/channels/:id/daily-slots` |
 | Jobs & metrics | `/api/jobs`, `/api/metrics/channels`, `/api/metrics/media-items` |
 | Output | `/iptv/channels.m3u`, `/xmltv` (or `/epg.xml`), `/stream/:uuid`, `/logos/:uuid` |
 | Ops | `/health`, `/api/version`, `/api/debug/stream/:uuid` |

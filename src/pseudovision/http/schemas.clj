@@ -279,6 +279,10 @@
   [:int {:min 0 :max 127
          :description "Day-of-week bitmask. Mon=1 Tue=2 Wed=4 Thu=8 Fri=16 Sat=32 Sun=64. 127 = every day."}])
 
+(def IsoDate
+  [:re {:description "Calendar date, YYYY-MM-DD (inclusive slot date bound)"}
+   #"^\d{4}-\d{2}-\d{2}$"])
+
 (def Slot
   [:map
    [:id                         SlotId]
@@ -314,7 +318,10 @@
    [:fill-with-group-mode       {:optional true} :string]
    [:required-tags              {:optional true} TagList]
    [:excluded-tags              {:optional true} TagList]
-   [:days-of-week               {:optional true} DaysOfWeek]])
+   [:days-of-week               {:optional true} DaysOfWeek]
+   [:active-from                {:optional true} [:maybe IsoDate]]
+   [:active-until               {:optional true} [:maybe IsoDate]]
+   [:is-override                {:optional true} :boolean]])
 
 (def PaginatedSlots
   "Paginated response for schedule slots."
@@ -355,7 +362,10 @@
    [:fill-with-group-mode       {:optional true} :string]
    [:required-tags              {:optional true} TagList]
    [:excluded-tags              {:optional true} TagList]
-   [:days-of-week               {:optional true} DaysOfWeek]])
+   [:days-of-week               {:optional true} DaysOfWeek]
+   [:active-from                {:optional true} [:maybe IsoDate]]
+   [:active-until               {:optional true} [:maybe IsoDate]]
+   [:is-override                {:optional true} :boolean]])
 
 (def SlotUpdate
   [:map
@@ -390,7 +400,10 @@
    [:fill-with-group-mode       {:optional true} :string]
    [:required-tags              {:optional true} TagList]
    [:excluded-tags              {:optional true} TagList]
-   [:days-of-week               {:optional true} DaysOfWeek]])
+   [:days-of-week               {:optional true} DaysOfWeek]
+   [:active-from                {:optional true} [:maybe IsoDate]]
+   [:active-until               {:optional true} [:maybe IsoDate]]
+   [:is-override                {:optional true} :boolean]])
 
 ;; ---------------------------------------------------------------------------
 ;; Filler presets
@@ -1043,28 +1056,6 @@
    [:tag_aggregates     {:optional true} [:vector TagAggregate]]
    [:runtime_histogram  [:vector RuntimeBucket]]
    [:generated_at       {:optional true} [:maybe :string]]])
-
-;; ---------------------------------------------------------------------------
-;; DailySlot — expanded slot from Tunabrain expander
-;; ---------------------------------------------------------------------------
-
-(def DailySlot
-  "Concrete slot produced by the deterministic expander."
-  [:map
-   [:start-time                :string]
-   [:end-time                  :string]
-   [:media-id                  {:optional true} [:maybe :string]]
-   [:media-selection-strategy  {:optional true} [:enum "random" "sequential" "specific"]]
-   [:category-filters          {:optional true} [:vector :string]]
-   [:notes                     {:optional true} [:vector :string]]])
-
-(def DailySlotIngestResult
-  "Result of bulk-ingesting DailySlots into a channel."
-  [:map
-   [:ingested        :int]
-   [:skipped         :int]
-   [:errors          [:vector :string]]
-   [:channel_id      :int]])
 
 (def GroutSyncResult
   "Result of a Grout long-form content sync. `enabled` is false (with zero

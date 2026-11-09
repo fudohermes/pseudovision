@@ -431,12 +431,10 @@
 ;; ---------------------------------------------------------------------------
 ;; Season-aware / tag-scoped playable resolution
 ;;
-;; Shared by the daily-slots ingest (pseudovision.http.api.daily-slots) and the
-;; native scheduling engine's collection resolver (pseudovision.db.collections)
-;; so "all episodes of show X" and "all episodes matching genre tag Y" are
-;; resolved identically everywhere, instead of maintaining two copies of the
-;; season-traversal / parent-tag-inheritance logic that previously only lived
-;; in daily-slots.clj.
+;; Used by the native scheduling engine's collection resolver
+;; (pseudovision.db.collections) and the scheduling engine itself, so "all
+;; episodes of show X" and "all episodes matching genre tag Y" are resolved the
+;; same way everywhere.
 ;; ---------------------------------------------------------------------------
 
 (defn list-show-episodes-by-id
@@ -534,18 +532,41 @@
           (h/order-by :play.id)
           sql/format))))
 
+(defn- category-tag-match
+  "HoneySQL predicate: does the tag column `tag-col` name `category`, bare or
+   `genre:`-prefixed, ignoring case AND separator style?
+
+   The tag vocabulary is mixed. Jellyfin genres are stored kebab-cased
+   (`genre:sci-fi-and-fantasy`), while TS tag curation stores snake_case
+   (`dark_comedy`, `sci_fi_and_fantasy`), and LLM-emitted `random:<category>`
+   ids arrive in either form (TS kebab-cases monthly overrides). An exact
+   match on one form silently resolved the other to an empty pool, so the
+   slot was skipped as dead air. Both sides are reduced to the same key here:
+   the stored name is lowercased with every run of characters other than
+   letters, digits and `:` collapsed to a single `-`, and the category goes
+   through `tags/kebab-case`. The plain lowercase forms are kept too, so a
+   category containing `&` still matches a tag stored verbatim."
+  [tag-col category]
+  (let [lc  (str/lower-case category)
+        kc  (tags/kebab-case category)
+        norm [:regexp_replace [:lower tag-col] "[^a-z0-9:]+" "-" "g"]]
+    [:or [:= [:lower tag-col] lc]
+         [:= [:lower tag-col] (str "genre:" lc)]
+         [:= norm kc]
+         [:= norm (str "genre:" kc)]]))
+
 (defn resolve-playable-by-tag
   "Resolves a genre/category tag (bare or `genre:`-prefixed, case-insensitive,
-   kebab-case tolerant) to concrete *playable* items: matching shows are
-   expanded to their (season-nested) episodes, matching movies resolve to
-   themselves. Mirrors the matching semantics of a `random:<category>` pool
+   hyphen/underscore insensitive, see `category-tag-match`) to concrete
+   *playable* items: matching shows are expanded to their (season-nested)
+   episodes, matching movies resolve to themselves. Mirrors the matching semantics of a `random:<category>` pool
    at air time.
 
    `:require-tags` (optional) — exact tag strings (e.g. `channel:hua`) the
    top-level item must ALSO carry, ANDed with the category match. Used to
    scope a category pool to one channel's own mapped media, same as the
-   `channel-tag` scoping `publish-daily-slots!` applies to `random:<category>`
-   pools today.
+   `channel-tag` scoping of `auto:category:<cat>:<channel-tag>` smart
+   collections.
 
    Each row carries `:_top-id` — the id of the top-level item (show or movie)
    it was resolved from — for show-level tag lookups downstream.
@@ -555,7 +576,7 @@
    uses `next.jdbc`'s `as-kebab-maps`, which qualifies every column — even an
    aliased one — by its *source table* and turns `_`→`-`, so a raw
    `[:top.id :_top-id]` alias would surface as `:media-items/-top-id`, never
-   the bare `:_top-id` that `daily-slots/top-id-of` reads. (This is the same
+   the bare `:_top-id` that downstream show-level tag lookups read. (This is the same
    behaviour that makes the `[:mvp.duration :duration]` alias arrive as
    `:media-versions/duration`.) When the alias silently missed, every episode
    fell back to its own id, show-level tags like `channel:<slug>` were never
@@ -597,10 +618,7 @@
                         [:in :top.kind [(sql-util/->pg-enum "media_item_kind" "show")
                                         (sql-util/->pg-enum "media_item_kind" "movie")
                                         (sql-util/->pg-enum "media_item_kind" "program")]]
-                        [:or [:= [:lower :t.name] (str/lower-case category)]
-                             [:= [:lower :t.name] (str "genre:" (str/lower-case category))]
-                             [:= [:lower :t.name] (tags/kebab-case category)]
-                             [:= [:lower :t.name] (str "genre:" (tags/kebab-case category))]]]
+                        (category-tag-match :t.name category)]
                        (map exact-tag-exists-subq)
                        require-tags))
         (h/order-by :play.id)
