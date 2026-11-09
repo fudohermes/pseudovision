@@ -129,33 +129,43 @@
         {:media-items/id        (:media-items/id found)
          :media-versions/duration (or (:duration found) (Duration/ofMillis ms))}
         (jdbc/with-transaction [tx ds]
+          ;; Upsert, not bare insert: concurrent rebuild jobs race here (two
+          ;; daily/quarterly builds can ingest the same grout:<id> clip at the
+          ;; same time, and the pre-check above can't see the other job's
+          ;; uncommitted row). ON CONFLICT (library_path_id, remote_key) — the
+          ;; uq_media_items_library_remote unique index — makes this atomic;
+          ;; DO UPDATE (a no-op re-set) instead of DO NOTHING so RETURNING
+          ;; yields the existing row's :id on the conflict path too.
           (let [item    (db/execute-one! tx
                           (-> (h/insert-into :media-items)
                               (h/values [{:kind            (sql-util/->pg-enum "media_item_kind" "other_video")
                                           :state           (sql-util/->pg-enum "media_item_state" "normal")
                                           :library-path-id lib-path-id
                                           :remote-key      (remote-key clip)}])
+                              (h/on-conflict :library-path-id :remote-key)
+                              (h/do-update-set :remote-key)
                               (h/returning :*)
                               sql/format))
-                ;; Both rows come from `db/execute-one!`, which uses
-                ;; `rs/as-unqualified-kebab-maps` — so the returned keys are
-                ;; `:id` and `:id` (not `:media-items/id` / `:media-versions/id`).
-                ;; The previous qualified lookups silently returned nil and
-                ;; the `media-versions` insert below violated the NOT NULL
-                ;; constraint on `media_item_id`, rolling back the whole Grout
-                ;; clip ingest. With these, both inserts succeed and Grout
-                ;; clips can flow into `media_files` like Jellyfin items.
                 item-id (:id item)
-                ver     (db/execute-one! tx
-                          (-> (h/insert-into :media-versions)
-                              (h/values [{:media-item-id item-id
-                                          :duration (-> (Duration/ofMillis ms)
-                                                        sql-util/duration->pg-interval
-                                                        sql-util/->pg-interval)
-                                          :width  (or (:width clip) 0)
-                                          :height (or (:height clip) 0)}])
-                              (h/returning :*)
-                              sql/format))]
+                ;; Guard the version: the raced path may land on an item that
+                ;; already has a version, and media-versions has no unique key
+                ;; on media_item_id to catch a duplicate.
+                ver     (or (db/execute-one! tx
+                              (-> (h/select :*)
+                                  (h/from :media-versions)
+                                  (h/where [:= :media-item-id item-id])
+                                  (h/limit 1)
+                                  sql/format))
+                            (db/execute-one! tx
+                              (-> (h/insert-into :media-versions)
+                                  (h/values [{:media-item-id item-id
+                                              :duration (-> (Duration/ofMillis ms)
+                                                            sql-util/duration->pg-interval
+                                                            sql-util/->pg-interval)
+                                              :width  (or (:width clip) 0)
+                                              :height (or (:height clip) 0)}])
+                                  (h/returning :*)
+                                  sql/format)))]
             (db/execute-one! tx
               (-> (h/insert-into :media-files)
                   (h/values [{:media-version-id (:id ver)
@@ -429,24 +439,38 @@
       (jdbc/with-transaction [tx ds]
         (let [existing (existing-item tx lib-path-id clip)
               item-id  (or (:media-items/id existing)
+                           ;; Upsert, not bare insert — same race as
+                           ;; `ingest-clip!`: a concurrent build can insert the
+                           ;; same grout:<id> program after our pre-check misses
+                           ;; its uncommitted row. ON CONFLICT on
+                           ;; uq_media_items_library_remote makes it atomic.
                            (let [item (db/execute-one! tx
                                         (-> (h/insert-into :media-items)
                                             (h/values [{:kind            (sql-util/->pg-enum "media_item_kind" "program")
                                                         :state           (sql-util/->pg-enum "media_item_state" "normal")
                                                         :library-path-id lib-path-id
                                                         :remote-key      (remote-key clip)}])
+                                            (h/on-conflict :library-path-id :remote-key)
+                                            (h/do-update-set :remote-key)
                                             (h/returning :*)
                                             sql/format))
-                                 ver  (db/execute-one! tx
-                                        (-> (h/insert-into :media-versions)
-                                            (h/values [{:media-item-id (:id item)
-                                                        :duration (-> (Duration/ofMillis ms)
-                                                                      sql-util/duration->pg-interval
-                                                                      sql-util/->pg-interval)
-                                                        :width  (or (:width clip) 0)
-                                                        :height (or (:height clip) 0)}])
-                                            (h/returning :*)
-                                            sql/format))]
+                                 iid  (:id item)
+                                 ver  (or (db/execute-one! tx
+                                            (-> (h/select :*)
+                                                (h/from :media-versions)
+                                                (h/where [:= :media-item-id iid])
+                                                (h/limit 1)
+                                                sql/format))
+                                          (db/execute-one! tx
+                                            (-> (h/insert-into :media-versions)
+                                                (h/values [{:media-item-id iid
+                                                            :duration (-> (Duration/ofMillis ms)
+                                                                          sql-util/duration->pg-interval
+                                                                          sql-util/->pg-interval)
+                                                            :width  (or (:width clip) 0)
+                                                            :height (or (:height clip) 0)}])
+                                                (h/returning :*)
+                                                sql/format)))]
                              (db/execute-one! tx
                                (-> (h/insert-into :media-files)
                                    (h/values [{:media-version-id (:id ver)
@@ -455,7 +479,7 @@
                                    (h/on-conflict :path-hash)
                                    (h/do-update-set :media-version-id :path)
                                    sql/format))
-                             (:id item)))]
+                             iid))]
           (upsert-program-metadata! tx item-id clip)
           (if existing :updated :synced))))))
 
