@@ -279,6 +279,10 @@
   [:int {:min 0 :max 127
          :description "Day-of-week bitmask. Mon=1 Tue=2 Wed=4 Thu=8 Fri=16 Sat=32 Sun=64. 127 = every day."}])
 
+(def IsoDate
+  [:re {:description "Calendar date, YYYY-MM-DD (inclusive slot date bound)"}
+   #"^\d{4}-\d{2}-\d{2}$"])
+
 (def Slot
   [:map
    [:id                         SlotId]
@@ -314,7 +318,10 @@
    [:fill-with-group-mode       {:optional true} :string]
    [:required-tags              {:optional true} TagList]
    [:excluded-tags              {:optional true} TagList]
-   [:days-of-week               {:optional true} DaysOfWeek]])
+   [:days-of-week               {:optional true} DaysOfWeek]
+   [:active-from                {:optional true} [:maybe IsoDate]]
+   [:active-until               {:optional true} [:maybe IsoDate]]
+   [:is-override                {:optional true} :boolean]])
 
 (def PaginatedSlots
   "Paginated response for schedule slots."
@@ -355,7 +362,10 @@
    [:fill-with-group-mode       {:optional true} :string]
    [:required-tags              {:optional true} TagList]
    [:excluded-tags              {:optional true} TagList]
-   [:days-of-week               {:optional true} DaysOfWeek]])
+   [:days-of-week               {:optional true} DaysOfWeek]
+   [:active-from                {:optional true} [:maybe IsoDate]]
+   [:active-until               {:optional true} [:maybe IsoDate]]
+   [:is-override                {:optional true} :boolean]])
 
 (def SlotUpdate
   [:map
@@ -390,7 +400,10 @@
    [:fill-with-group-mode       {:optional true} :string]
    [:required-tags              {:optional true} TagList]
    [:excluded-tags              {:optional true} TagList]
-   [:days-of-week               {:optional true} DaysOfWeek]])
+   [:days-of-week               {:optional true} DaysOfWeek]
+   [:active-from                {:optional true} [:maybe IsoDate]]
+   [:active-until               {:optional true} [:maybe IsoDate]]
+   [:is-override                {:optional true} :boolean]])
 
 ;; ---------------------------------------------------------------------------
 ;; Filler presets

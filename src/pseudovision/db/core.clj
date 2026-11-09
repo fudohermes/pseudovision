@@ -75,6 +75,11 @@
   java.sql.Timestamp
   (read-column-by-label [v _] (.toInstant v))
   (read-column-by-index [v _ _] (.toInstant v))
+  java.sql.Date
+  ;; DATE columns (e.g. schedule_slots.active_from) read as LocalDate, which the
+  ;; response middleware renders as an ISO date string.
+  (read-column-by-label [v _] (.toLocalDate ^java.sql.Date v))
+  (read-column-by-index [v _ _] (.toLocalDate ^java.sql.Date v))
   java.sql.Array
   ;; SQL arrays (e.g. TEXT[] columns) arrive as PgArray, which is not seqable.
   ;; Decode to a Clojure vector so callers can treat them as ordinary seqs.

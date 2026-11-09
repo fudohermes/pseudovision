@@ -36,6 +36,7 @@
             [pseudovision.media.grout-source :as grout-source]
             [pseudovision.scheduling.cursor      :as cursor]
             [pseudovision.scheduling.enumerators :as enum]
+            [pseudovision.scheduling.occurrences :as occ]
             [pseudovision.scheduling.filler      :as filler]
             [pseudovision.scheduling.packing     :as packing]
             [pseudovision.util.sql  :as sql-util]
@@ -814,6 +815,88 @@
           spans))
 
 
+;; ---------------------------------------------------------------------------
+;; Day-based build loop (all-fixed schedules)
+;; ---------------------------------------------------------------------------
+
+(defn day-based?
+  "Whether `slots` can be built day by day: every slot is fixed-anchor with a
+   start time. Schedules synced from TS's quarterly grid always are. Schedules
+   with sequential slots keep the slot-cycle loop."
+  [slots]
+  (and (seq slots)
+       (every? #(and (= "fixed" (:schedule-slots/anchor %))
+                     (:schedule-slots/start-time %))
+               slots)))
+
+(defn- emit-occurrence
+  "Emit one slot occurrence starting at the cursor. Unlike process-slot there is
+   no days-of-week check here: occurrences/next-occurrence only returns slots
+   that air on that date."
+  [db cursor slot channel playout-id next-start opts]
+  (case (keyword (or (:schedule-slots/fill-mode slot) "once"))
+    :once  (emit-once  db cursor slot channel playout-id opts)
+    :count (emit-count db cursor slot channel playout-id opts)
+    :block (emit-block db cursor slot channel playout-id opts)
+    :flood (emit-flood db cursor slot channel playout-id (assoc opts :flood-end next-start))
+    (do (log/warn "Unknown fill mode, skipping slot" {:slot-id (:schedule-slots/id slot)})
+        [[] cursor])))
+
+(defn- build-by-day
+  "Fill [cursor, horizon] by repeatedly asking which slot occurrence comes next
+   (see pseudovision.scheduling.occurrences): fill any gap before it with
+   fallback filler, emit it, and move on. Each day's slots are chosen by date,
+   so a slot that doesn't air today never moves the cursor, and override slots
+   replace the base strips they overlap.
+
+   Returns `{:events .. :cursor .. :stalled? bool}`. A slot error throws
+   ex-info carrying the events and cursor so far under :events / :cursor."
+  [db initial-cur slots channel playout-id horizon opts]
+  (let [zone-id (get opts :zone-id (t/default-zone-id))]
+    (loop [cursor initial-cur
+           events []]
+      (let [start (:next-start cursor)
+            o     (when-not (.isAfter ^Instant start ^Instant horizon)
+                    (occ/next-occurrence slots start zone-id))]
+        (cond
+          (.isAfter ^Instant start ^Instant horizon)
+          {:events events :cursor cursor :stalled? false}
+
+          (nil? o)
+          (do (log/warn "No slot airs within a week of the cursor; stopping"
+                        {:playout-id playout-id :at (str start)})
+              {:events events :cursor cursor :stalled? true})
+
+          (.isAfter ^Instant (:start o) ^Instant horizon)
+          {:events events :cursor cursor :stalled? false}
+
+          :else
+          (let [slot     (:slot o)
+                occ-at   (:start o)
+                [gap-events cur1]
+                (if (.isAfter ^Instant occ-at ^Instant start)
+                  (let [[evs c] (apply-filler db cursor {} channel :fallback start occ-at
+                                              playout-id opts)]
+                    [evs (assoc c :next-start occ-at)])
+                  [[] cursor])
+                following (occ/next-occurrence slots (.plusSeconds ^Instant occ-at 1) zone-id)
+                [slot-events cur2]
+                (try
+                  (emit-occurrence db cur1 slot channel playout-id (:start following) opts)
+                  (catch Exception e
+                    (throw (ex-info (str "Build failed at slot " (:schedule-slots/id slot)
+                                         ": " (ex-message e))
+                                    {:events  (into events gap-events)
+                                     :cursor  cur1
+                                     :slot-id (:schedule-slots/id slot)}
+                                    e))))
+                ;; Never let an occurrence leave the cursor where it was (an
+                ;; empty pool with no filler emits nothing); skip to its end.
+                cur3 (if (.isAfter ^Instant (:next-start cur2) ^Instant occ-at)
+                       cur2
+                       (assoc cur2 :next-start (or (:end o) (.plusSeconds ^Instant occ-at 60))))]
+            (recur cur3 (into events (into gap-events slot-events)))))))))
+
 (defn build!
   "Builds the playout, replacing non-manual events from the rebuild point to the
    horizon.  Runs inside a transaction; saves the updated cursor on success.
@@ -930,99 +1013,124 @@
                   opts'   (assoc opts' :pack-filler? (get opts :pack-filler? true)
                                        :recency-window window
                                        :filler-airings-atom (atom airings))]
-            (loop [cursor       initial-cur
-                   slot-idx     0
-                   cycle-anchor nil
-                   events       []]
-              (let [slot  (nth slots slot-idx nil)
-                    start (:next-start cursor)]
-                (cond
-                  (or (nil? slot) (.isAfter start horizon))
-                  ;; Done; flush events and save cursor
-                  (do
-                    (playout-db/bulk-insert-events! tx events)
-                    (playout-db/update-playout! tx playout-id
-                                                {:cursor         (cursor/->json cursor)
-                                                 :last-built-at  now
-                                                 :build-success  true
-                                                 :build-message  nil})
-                    (log/info "Build complete" {:playout-id playout-id
-                                                :events     (count events)})
-                    (count events))
+            (if (day-based? slots)
+              (let [{:keys [events cursor stalled?]}
+                    (try
+                      (build-by-day tx initial-cur slots channel playout-id horizon opts')
+                      (catch clojure.lang.ExceptionInfo e
+                        (let [{:keys [events cursor]} (ex-data e)]
+                          (when (and events cursor)
+                            (playout-db/bulk-insert-events! tx events)
+                            (playout-db/update-playout! tx playout-id
+                                                        {:cursor        (cursor/->json cursor)
+                                                         :last-built-at now
+                                                         :build-success false
+                                                         :build-message (ex-message e)})))
+                        (throw e)))]
+                (playout-db/bulk-insert-events! tx events)
+                (playout-db/update-playout! tx playout-id
+                                            {:cursor         (cursor/->json cursor)
+                                             :last-built-at  now
+                                             :build-success  (not stalled?)
+                                             :build-message  (when stalled?
+                                                               "Build stopped: no slot airs within a week")})
+                (log/info "Build complete" {:playout-id playout-id
+                                            :mode       :by-day
+                                            :events     (count events)})
+                (count events))
+              (loop [cursor       initial-cur
+                     slot-idx     0
+                     cycle-anchor nil
+                     events       []]
+                (let [slot  (nth slots slot-idx nil)
+                      start (:next-start cursor)]
+                  (cond
+                    (or (nil? slot) (.isAfter start horizon))
+                    ;; Done; flush events and save cursor
+                    (do
+                      (playout-db/bulk-insert-events! tx events)
+                      (playout-db/update-playout! tx playout-id
+                                                  {:cursor         (cursor/->json cursor)
+                                                   :last-built-at  now
+                                                   :build-success  true
+                                                   :build-message  nil})
+                      (log/info "Build complete" {:playout-id playout-id
+                                                  :events     (count events)})
+                      (count events))
 
-                  ;; Safety net: if a full pass over every slot left the cursor
-                  ;; exactly where it started, the schedule can't make forward
-                  ;; progress (e.g. every slot resolves to no schedulable
-                  ;; content). Without this, build! would loop forever and the
-                  ;; HTTP request would hang with no response. Abort and record
-                  ;; the failure instead.
-                  (and (zero? slot-idx)
-                       (some? cycle-anchor)
-                       (not (.isAfter start cycle-anchor)))
-                  (do
-                    (log/warn "Build stalled: timeline did not advance over a full slot cycle; aborting"
-                              {:playout-id playout-id :at (str start) :slots (count slots)})
-                    (playout-db/bulk-insert-events! tx events)
-                    (playout-db/update-playout! tx playout-id
-                                                {:cursor         (cursor/->json cursor)
-                                                 :last-built-at  now
-                                                 :build-success  false
-                                                 :build-message  "Build stalled: no schedulable content advanced the timeline"})
-                    (count events))
+                    ;; Safety net: if a full pass over every slot left the cursor
+                    ;; exactly where it started, the schedule can't make forward
+                    ;; progress (e.g. every slot resolves to no schedulable
+                    ;; content). Without this, build! would loop forever and the
+                    ;; HTTP request would hang with no response. Abort and record
+                    ;; the failure instead.
+                    (and (zero? slot-idx)
+                         (some? cycle-anchor)
+                         (not (.isAfter start cycle-anchor)))
+                    (do
+                      (log/warn "Build stalled: timeline did not advance over a full slot cycle; aborting"
+                                {:playout-id playout-id :at (str start) :slots (count slots)})
+                      (playout-db/bulk-insert-events! tx events)
+                      (playout-db/update-playout! tx playout-id
+                                                  {:cursor         (cursor/->json cursor)
+                                                   :last-built-at  now
+                                                   :build-success  false
+                                                   :build-message  "Build stalled: no schedulable content advanced the timeline"})
+                      (count events))
 
-                  ;; Process this slot
-                  :else
-                  (let [[cursor''' next-slot-idx next-cycle-anchor next-events]
-                        (try
-                          (let [[new-events cursor'] (process-slot
-                                                       tx cursor slot channel
-                                                       playout-id slots opts')
-                                fill-mode   (keyword (or (:schedule-slots/fill-mode slot) "once"))
-                                zone-id     (get opts' :zone-id (t/default-zone-id))
-                                next-slot   (nth slots (mod (inc slot-idx) (count slots)) nil)
-                                gap-end     (when (and (not= fill-mode :flood)
-                                                       (= "fixed" (:schedule-slots/anchor next-slot)))
-                                              (t/time-of-day-on-same-day
-                                               (:schedule-slots/start-time next-slot)
-                                               (:next-start cursor')
-                                               zone-id))
-                                [gap-events cursor'']
-                                (if gap-end
-                                  (let [[evs c] (apply-filler tx cursor' {} channel
-                                                              :fallback (:next-start cursor') gap-end
-                                                              playout-id opts')]
-                                    ;; apply-filler doesn't move :next-start, so
-                                    ;; without this the fixed slot would start at
-                                    ;; the old edge, on top of the gap filler,
-                                    ;; instead of at its anchor time.
-                                    [evs (cond-> c
-                                           (.isAfter ^Instant gap-end (:next-start c))
-                                           (assoc :next-start gap-end))])
-                                  [[] cursor'])
-                                cursor''' (cursor/advance-slot cursor'' (count slots))]
-                            [cursor''' (mod (inc slot-idx) (count slots))
-                             (if (zero? slot-idx) start cycle-anchor)
-                             (into events (into new-events gap-events))])
-                          (catch Exception e
-                            (log/error "Error processing slot; build failed"
-                                      {:playout-id playout-id
-                                       :slot-idx slot-idx
-                                       :slot-id (:schedule-slots/id slot)
-                                       :error (str e)
-                                       :error-type (class e)})
-                            (let [error-msg (str "Build failed at slot " slot-idx ": " (ex-message e))]
-                              (playout-db/bulk-insert-events! tx events)
-                              (playout-db/update-playout! tx playout-id
-                                                          {:cursor         (cursor/->json cursor)
-                                                           :last-built-at  now
-                                                           :build-success  false
-                                                           :build-message  error-msg})
-                              (throw (ex-info error-msg
-                                             {:slot-idx slot-idx
-                                              :slot-id (:schedule-slots/id slot)
-                                              :playout-id playout-id
-                                              :cause e})))))]
-                    (recur cursor''' next-slot-idx next-cycle-anchor next-events)))))))
+                    ;; Process this slot
+                    :else
+                    (let [[cursor''' next-slot-idx next-cycle-anchor next-events]
+                          (try
+                            (let [[new-events cursor'] (process-slot
+                                                         tx cursor slot channel
+                                                         playout-id slots opts')
+                                  fill-mode   (keyword (or (:schedule-slots/fill-mode slot) "once"))
+                                  zone-id     (get opts' :zone-id (t/default-zone-id))
+                                  next-slot   (nth slots (mod (inc slot-idx) (count slots)) nil)
+                                  gap-end     (when (and (not= fill-mode :flood)
+                                                         (= "fixed" (:schedule-slots/anchor next-slot)))
+                                                (t/time-of-day-on-same-day
+                                                 (:schedule-slots/start-time next-slot)
+                                                 (:next-start cursor')
+                                                 zone-id))
+                                  [gap-events cursor'']
+                                  (if gap-end
+                                    (let [[evs c] (apply-filler tx cursor' {} channel
+                                                                :fallback (:next-start cursor') gap-end
+                                                                playout-id opts')]
+                                      ;; apply-filler doesn't move :next-start, so
+                                      ;; without this the fixed slot would start at
+                                      ;; the old edge, on top of the gap filler,
+                                      ;; instead of at its anchor time.
+                                      [evs (cond-> c
+                                             (.isAfter ^Instant gap-end (:next-start c))
+                                             (assoc :next-start gap-end))])
+                                    [[] cursor'])
+                                  cursor''' (cursor/advance-slot cursor'' (count slots))]
+                              [cursor''' (mod (inc slot-idx) (count slots))
+                               (if (zero? slot-idx) start cycle-anchor)
+                               (into events (into new-events gap-events))])
+                            (catch Exception e
+                              (log/error "Error processing slot; build failed"
+                                        {:playout-id playout-id
+                                         :slot-idx slot-idx
+                                         :slot-id (:schedule-slots/id slot)
+                                         :error (str e)
+                                         :error-type (class e)})
+                              (let [error-msg (str "Build failed at slot " slot-idx ": " (ex-message e))]
+                                (playout-db/bulk-insert-events! tx events)
+                                (playout-db/update-playout! tx playout-id
+                                                            {:cursor         (cursor/->json cursor)
+                                                             :last-built-at  now
+                                                             :build-success  false
+                                                             :build-message  error-msg})
+                                (throw (ex-info error-msg
+                                               {:slot-idx slot-idx
+                                                :slot-id (:schedule-slots/id slot)
+                                                :playout-id playout-id
+                                                :cause e})))))]
+                      (recur cursor''' next-slot-idx next-cycle-anchor next-events))))))))
           (catch Exception e
             ;; A slot error records build_success=false inside the transaction
             ;; and then throws, which rolls that record back along with the

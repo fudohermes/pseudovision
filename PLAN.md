@@ -22,8 +22,8 @@ lists its own share of each step.
 2. **Stop leaking secrets.** Done (Jellyfin API key out of PV responses and
    logs; Marquee's stack traces behind `ENABLE_UI_DEBUG_TRACES`).
 3. **One timeline writer, then clear out dead code.** PV's native engine
-   becomes the only writer. Monthly overrides become date-bounded manual
-   events, and the DailySlot push is deleted from TS and PV. Then delete dead
+   becomes the only writer. Monthly overrides become date-bounded override
+   slots, and the DailySlot push is deleted from TS and PV. Then delete dead
    code (TS strategies and `llm.clj`, the TS TTS stub, duplicate import paths,
    one-time migrations, superseded endpoints, Tunabrain's strategy and
    `channel-mapping` endpoints, unused PV tables and helpers), gate PV's
@@ -53,9 +53,9 @@ Grout clips over HTTP instead of a shared mount; merging pvcli and
 
 ### One timeline writer (ecosystem step 3)
 
-- [ ] Support TS applying monthly overrides as date-bounded manual events for
-      each override window (manual events already survive rebuilds; check that
-      the engine resumes cleanly after an override window ends).
+- [ ] TS syncs monthly overrides as date-bounded override slots
+      (`active_from`/`active_until`/`is_override`). PV's day-based build loop
+      already honours them for all-fixed schedules.
 
 ### Dead code (ecosystem step 3)
 
