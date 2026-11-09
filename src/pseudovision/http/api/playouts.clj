@@ -96,10 +96,15 @@
                                     "now"     (sched/rebuild-from-now! db playout-id horizon-days sched-opts)
                                     "horizon" (sched/rebuild-horizon! db playout-id 7 horizon-days sched-opts)
                                     (sched/rebuild-from-now! db playout-id horizon-days sched-opts))]
-                        {:message          "Rebuild complete"
-                         :events-generated count
-                         :horizon-days     horizon-days
-                         :from             from})))]
+                        (cond-> {:message          "Rebuild complete"
+                                 :events-generated count
+                                 :horizon-days     horizon-days
+                                 :from             from}
+                          ;; build! returns 0 without touching the playout when
+                          ;; no schedule is attached, which looked exactly like
+                          ;; "already at the horizon". Say so in the result.
+                          (nil? (:playouts/schedule-id playout))
+                          (assoc :warning "no schedule attached; nothing to build")))))]
           {:status 202 :body {:job job}})
         {:status 404 :body {:error "No playout for this channel"}}))))
 
