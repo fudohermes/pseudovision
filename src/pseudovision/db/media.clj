@@ -669,9 +669,10 @@
                                        ;; Must render as EXTRACT(EPOCH FROM mv.duration):
                                        ;; PG has no EXTRACT(EPOCH, x) function-call
                                        ;; form - that is a syntax error. HoneySQL
-                                       ;; renders (sql/call :EXTRACT ...) with
-                                       ;; argument commas, so use a raw fragment.
-                                       [(sql/raw "EXTRACT(EPOCH FROM mv.duration)")
+                                       ;; renders [:extract ...] with argument
+                                       ;; commas, so use a [:raw ...] fragment
+                                       ;; (HoneySQL 2 has no sql/raw function).
+                                       [[:raw "EXTRACT(EPOCH FROM mv.duration)"]
                                         :duration-epoch])
                                     (h/from [:media-items :mi])
                                     (h/left-join [:media-versions :mv]
