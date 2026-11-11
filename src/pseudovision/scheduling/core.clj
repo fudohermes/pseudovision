@@ -912,7 +912,13 @@
                            (if saved-cursor
                              (assoc saved-cursor :next-start resume-edge)
                              (cursor/init now)))
-            window       (get opts :recency-window (t/hours->duration 4))]
+            ;; Filler recency window: how long an item's past airing keeps
+            ;; penalising it in the packer. Per-channel override first
+            ;; (channels.filler_recency_hours — e.g. Enigma TV runs a short
+            ;; window so its limited supply repeats sooner), then the caller's
+            ;; opts, then the 4-hour default.
+            window       (or (some-> channel :channels/filler-recency-hours t/hours->duration)
+                             (get opts :recency-window (t/hours->duration 4)))]
         (jdbc/with-transaction [tx db]
           ;; Remove auto-generated events from the rebuild point forward. On a
           ;; reset that's the in-progress event's finish (preserving what's on

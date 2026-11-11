@@ -293,6 +293,22 @@
    whatever is closest, so a thin pool never fails a slot outright."
   15)
 
+(defn- implausible-runtime?
+  "True when an item's probed duration is too short to be a real program of
+   its kind. Movies are never legitimately under 20 minutes; episodes are not
+   under 60 seconds. These are the signature of a FAILED PROBE on a real file
+   (The Godfather Part II probed at 1 second because its .m2ts wouldn't
+   decode — and then aired 769 two-minute blips on Spotlight in one week,
+   audit of 2026-11-10). `playable-item?` above only requires a *positive*
+   duration, so a seconds-long garbage probe sails right through it."
+  [item]
+  (let [dur  (or (:media-versions/duration item) (:duration item))
+        secs (if dur (time/duration->seconds dur) 0)
+        kind (some-> item :media-items/kind name)]
+    (if (pos? secs)
+      (if (= "movie" kind) (< secs 1200) (< secs 60))
+      false)))
+
 (defn- playable-item?
   "True when `item` carries a known, positive runtime. Mirrors
    pseudovision.scheduling.core/playable? — an item with no probed duration
@@ -432,10 +448,54 @@
                                                            (map :tag (get item-tags sid))))})
                           passing)
                        items)
+            ;; ------------------------------------------------------------
+            ;; Content-eligibility gates (random:<category> pools only).
+            ;; The two classes of junk that historically slipped into these
+            ;; pools and got scheduled as content hundreds of times:
+            ;;
+            ;;   * Untagged orphans — items with no `channel:*` tag on
+            ;;     themselves or their parent show (Case Closed airing
+            ;;     untagged as Nippon TV's biggest content block, comedy
+            ;;     compilations on Muse; audit of 2026-11-10). Everything a
+            ;;     channel deliberately programs is channel-tagged, so an
+            ;;     item with no channel tag anywhere is not deliberate
+            ;;     programming.
+            ;;   * Broken probes — see `implausible-runtime?`.
+            ;;
+            ;; A gated-empty pool yields "No playable items found" for that
+            ;; slot, which is loud and visible — the correct response to a
+            ;; pool that only contains junk. series:/movie: selections
+            ;; (explicit ids) are not gated: those are deliberate.
+            gated (if (= type "random")
+                    (let [item-ids (map :media-items/id filtered)
+                          top-ids  (distinct (map top-id-of filtered))
+                          all-ids  (vec (distinct (concat item-ids top-ids)))
+                          tag-rows (when (seq all-ids)
+                                     (db-core/query ds
+                                       (-> (h/select :m.media-item-id :mt.name)
+                                           (h/from [:metadata-tags :mt])
+                                           (h/join [:metadata :m] [:= :m.id :mt.metadata-id])
+                                           (h/where [:in :m.media-item-id all-ids])
+                                           sql/format)))
+                          item-tags (group-by :item-id
+                                              (map (fn [r]
+                                                     {:item-id (:metadata/media-item-id r)
+                                                      :tag      (:metadata-tags/name r)})
+                                                   tag-rows))
+                          tags-of (fn [item]
+                                    (set/union
+                                      (set (map :tag (get item-tags (:media-items/id item))))
+                                      (set (map :tag (get item-tags (top-id-of item))))))]
+                      (filterv (fn [item]
+                                 (and (boolean (some #(str/starts-with? % "channel:")
+                                                     (tags-of item)))
+                                      (not (implausible-runtime? item))))
+                               filtered))
+                    filtered)
             ;; Drop items with no probed (positive) duration — the event
             ;; below is stamped with the item's REAL runtime, so an unknown
             ;; length can't be scheduled truthfully.
-            playable (filterv playable-item? filtered)
+            playable (filterv playable-item? gated)
             ;; For pooled categories, narrow further to items whose runtime
             ;; plausibly belongs in this slot. series:/movie: selection is
             ;; unaffected (a specific id, or episode order, isn't up for

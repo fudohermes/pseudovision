@@ -113,6 +113,7 @@
    [:slug-seconds                   {:optional true} [:maybe :double]]
    [:stream-selector-mode           :string]
    [:stream-selector                {:optional true} [:maybe :string]]
+   [:filler-recency-hours           {:optional true} [:maybe :int]]
    [:is-enabled                     :boolean]
    [:show-in-epg                    :boolean]])
 
@@ -161,6 +162,9 @@
    [:slug-seconds                   {:optional true} [:maybe :double]]
    [:stream-selector-mode           {:optional true} :string]
    [:stream-selector                {:optional true} [:maybe :string]]
+   ;; Per-channel filler recency window, in hours (nil = global default of 4).
+   ;; Lower values let filler repeat sooner on supply-limited channels.
+   [:filler-recency-hours           {:optional true} [:maybe [:int {:min 0}]]]
    [:is-enabled                     {:optional true} :boolean]
    [:show-in-epg                    {:optional true} :boolean]])
 
@@ -192,6 +196,7 @@
    [:slug-seconds                   {:optional true} [:maybe :double]]
    [:stream-selector-mode           {:optional true} :string]
    [:stream-selector                {:optional true} [:maybe :string]]
+   [:filler-recency-hours           {:optional true} [:maybe [:int {:min 0}]]]
    [:is-enabled                     {:optional true} :boolean]
    [:show-in-epg                    {:optional true} :boolean]])
 

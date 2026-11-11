@@ -671,7 +671,10 @@
                                        ;; form - that is a syntax error. HoneySQL
                                        ;; renders (sql/call :EXTRACT ...) with
                                        ;; argument commas, so use a raw fragment.
-                                       [(sql/raw "EXTRACT(EPOCH FROM mv.duration)")
+                                       ;; HoneySQL 2.x has no raw *function* — a
+                                       ;; raw fragment is the [:raw "..."]
+                                       ;; special form.
+                                       [[:raw "EXTRACT(EPOCH FROM mv.duration)"]
                                         :duration-epoch])
                                     (h/from [:media-items :mi])
                                     (h/left-join [:media-versions :mv]

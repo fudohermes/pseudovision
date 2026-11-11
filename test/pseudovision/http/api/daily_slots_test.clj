@@ -58,9 +58,14 @@
                   playout-db/delete-events! (fn [& _] 0)
                   playout-db/bulk-insert-events! (fn [& _] nil)
                   db-core/query-one (fn [_ _] nil)
-                  db-core/query (fn [_ _] [{:media-items/id 42
-                                            :media-items/kind "episode"
-                                            :duration (java.time.Duration/ofMinutes 22)}])]
+                  db-core/query (fn [_ sqlvec]
+                                  (if (str/includes? (str/lower-case (or (first sqlvec) ""))
+                                                     "from metadata_tags")
+                                    ;; Channel-tagged, per the eligibility gate.
+                                    [{:metadata/media-item-id 42 :metadata-tags/name "channel:spectrum"}]
+                                    [{:media-items/id 42
+                                      :media-items/kind "episode"
+                                      :duration (java.time.Duration/ofMinutes 22)}]))]
       (let [handler (make-test-handler)
             resp    (handler (-> (mock/request :post "/api/channels/1/daily-slots")
                                 (mock/json-body [{:start-time "2026-01-10T10:00:00Z"
@@ -84,9 +89,14 @@
                   ;; Resolve any show lookup to a stub show; episode/tag queries
                   ;; resolve to a single concrete episode.
                   db-core/query-one (fn [_ _] {:media-items/id 99})
-                  db-core/query (fn [_ _] [{:media-items/id 42
-                                            :media-items/kind "episode"
-                                            :duration (java.time.Duration/ofMinutes 22)}])]
+                  db-core/query (fn [_ sqlvec]
+                                  (if (str/includes? (str/lower-case (or (first sqlvec) ""))
+                                                     "from metadata_tags")
+                                    ;; Channel-tagged, per the eligibility gate.
+                                    [{:metadata/media-item-id 42 :metadata-tags/name "channel:spectrum"}]
+                                    [{:media-items/id 42
+                                      :media-items/kind "episode"
+                                      :duration (java.time.Duration/ofMinutes 22)}]))]
       (let [batch [{:start-time "2026-06-29T00:00:00"
                     :end-time   "2026-06-29T01:00:00"
                     :media-id   "random:Mystery"
@@ -393,12 +403,17 @@
                     db-core/query-one (fn [_ _] nil)
                     ;; Pool for random:movie: a 55-minute film that fits a
                     ;; 1-hour slot, and a 130-minute epic that would grossly
-                    ;; overflow it.
-                    db-core/query (fn [_ _]
-                                    [{:media-items/id 501 :media-items/kind "movie"
-                                      :duration (java.time.Duration/ofMinutes 55)}
-                                     {:media-items/id 502 :media-items/kind "movie"
-                                      :duration (java.time.Duration/ofMinutes 130)}])]
+                    ;; overflow it. Both carry a channel tag (the eligibility
+                    ;; gate requires one on random pools).
+                    db-core/query (fn [_ sqlvec]
+                                    (let [sql (str/lower-case (or (first sqlvec) ""))]
+                                      (if (str/includes? sql "from metadata_tags")
+                                        [{:metadata/media-item-id 501 :metadata-tags/name "channel:spotlight"}
+                                         {:metadata/media-item-id 502 :metadata-tags/name "channel:spotlight"}]
+                                        [{:media-items/id 501 :media-items/kind "movie"
+                                          :duration (java.time.Duration/ofMinutes 55)}
+                                         {:media-items/id 502 :media-items/kind "movie"
+                                          :duration (java.time.Duration/ofMinutes 130)}])))]
         (let [batch [{:start-time "2026-08-01T20:00:00"
                       :end-time   "2026-08-01T21:00:00"
                       :media-id   "random:movie"
@@ -437,7 +452,14 @@
                     playout-db/delete-events! (fn [& _] 0)
                     playout-db/bulk-insert-events! (fn [_ events] (reset! captured events))
                     db-core/query-one (fn [_ _] nil)
-                    db-core/query (fn [_ _] (nth responses (swap! call-idx inc)))]
+                    db-core/query (fn [_ sqlvec]
+                                    (let [sql (str/lower-case (or (first sqlvec) ""))]
+                                      (if (str/includes? sql "from metadata_tags")
+                                        ;; Both pool items are deliberately
+                                        ;; channel-tagged (eligibility gate).
+                                        [{:metadata/media-item-id 601 :metadata-tags/name "channel:spotlight"}
+                                         {:metadata/media-item-id 602 :metadata-tags/name "channel:spotlight"}]
+                                        (nth responses (swap! call-idx inc)))))]
         (let [batch [{:start-time "2026-08-01T20:00:00"
                       :end-time   "2026-08-01T21:00:00"
                       :media-id   "random:movie"
@@ -492,8 +514,15 @@
                     db-core/query-one (fn [_ _] nil)
                     ;; Same underlying category pool on every call — as a real
                     ;; DB would return for the same category, regardless of
-                    ;; the querying slot's own duration.
-                    db-core/query (fn [_ _] pool)]
+                    ;; the querying slot's own duration. Pool items carry a
+                    ;; channel tag (the eligibility gate requires one).
+                    db-core/query (fn [_ sqlvec]
+                                    (let [sql (str/lower-case (or (first sqlvec) ""))]
+                                      (if (str/includes? sql "from metadata_tags")
+                                        (for [id [701 702 703]]
+                                          {:metadata/media-item-id id
+                                           :metadata-tags/name "channel:spectrum"})
+                                        pool)))]
         (let [batch [{:start-time "2026-08-01T10:00:00"
                       :end-time   "2026-08-01T10:24:00" ; ~24min slot
                       :media-id   "random:comedy"
@@ -520,6 +549,126 @@
             (is (= 3 (:ingested body)))
             (is (= 0 (:skipped body)))
             (is (empty? (:errors body)))))))))
+
+;; ---------------------------------------------------------------------------
+;; Content-eligibility gates on random:<category> pools (audit of 2026-11-10)
+;;
+;; Two classes of junk historically slipped into random pools and got
+;; scheduled as content hundreds of times:
+;;   * untagged orphans (Case Closed airing untagged as Nippon TV's biggest
+;;     content block; YouTube compilations on Muse), and
+;;   * broken probes (The Godfather Part II probed at 1 second and aired 769
+;;     two-minute blips on Spotlight in one week).
+;; ---------------------------------------------------------------------------
+
+(deftest daily-slots-gate-excludes-untagged-orphan-from-random-pool
+  (testing "a random:<category> pool item with no channel:* tag anywhere is not scheduled"
+    (with-redefs [channels-db/get-channel (fn [_ _] {:channels/id 1})
+                  playout-db/get-playout-for-channel (fn [_ _] {:playouts/id 1})
+                  playout-db/delete-events! (fn [& _] 0)
+                  playout-db/bulk-insert-events! (fn [& _] nil)
+                  db-core/query-one (fn [_ _] nil)
+                  db-core/query (fn [_ sqlvec]
+                                  (let [sql (str/lower-case (or (first sqlvec) ""))]
+                                    (cond
+                                      (str/includes? sql "from metadata_tags")
+                                      ;; No tag rows at all — the item (and any
+                                      ;; parent show) carries no channel:* tag.
+                                      []
+                                      :else
+                                      [{:media-items/id 801 :media-items/kind "episode"
+                                        :duration (java.time.Duration/ofMinutes 22)}])))]
+      (let [batch [{:start-time "2026-11-10T20:00:00"
+                    :end-time   "2026-11-10T20:30:00"
+                    :media-id   "random:comedy"
+                    :media-selection-strategy "random"
+                    :category-filters []
+                    :notes []}]
+            handler (make-test-handler)
+            resp    (handler (-> (mock/request :post "/api/channels/1/daily-slots")
+                                 (mock/json-body batch)))]
+        (is (= 200 (:status resp)))
+        (let [body (parse-json-body resp)]
+          (is (= 0 (:ingested body)) "the untagged orphan is not ingested")
+          (is (= 1 (:skipped body)))
+          (is (re-find #"(?i)no playable items" (first (:errors body)))))))))
+
+(deftest daily-slots-gate-includes-tagged-item-from-random-pool
+  (testing "the same pool ingests once the item carries a channel:* tag — the gate targets untagged junk, not random pools generally"
+    (with-redefs [channels-db/get-channel (fn [_ _] {:channels/id 1})
+                  playout-db/get-playout-for-channel (fn [_ _] {:playouts/id 1})
+                  playout-db/delete-events! (fn [& _] 0)
+                  playout-db/bulk-insert-events! (fn [& _] nil)
+                  db-core/query-one (fn [_ _] nil)
+                  db-core/query (fn [_ sqlvec]
+                                  (let [sql (str/lower-case (or (first sqlvec) ""))]
+                                    (cond
+                                      (str/includes? sql "from metadata_tags")
+                                      [{:metadata/media-item-id 801 :metadata-tags/name "channel:nippon"}]
+                                      :else
+                                      [{:media-items/id 801 :media-items/kind "episode"
+                                        :duration (java.time.Duration/ofMinutes 22)}])))]
+      (let [batch [{:start-time "2026-11-10T20:00:00"
+                    :end-time   "2026-11-10T20:30:00"
+                    :media-id   "random:comedy"
+                    :media-selection-strategy "random"
+                    :category-filters []
+                    :notes []}]
+            handler (make-test-handler)
+            resp    (handler (-> (mock/request :post "/api/channels/1/daily-slots")
+                                 (mock/json-body batch)))]
+        (is (= 200 (:status resp)))
+        (let [body (parse-json-body resp)]
+          (is (= 1 (:ingested body)) "a channel-tagged item passes the gate")
+          (is (= 0 (:skipped body))))))))
+
+(deftest daily-slots-gate-excludes-broken-probe-movie-from-random-pool
+  (testing "a channel-tagged movie whose probe recorded a seconds-long duration is not scheduled"
+    ;; Repro of the Spotlight blip storm: The Godfather Part II's .m2ts
+    ;; probed at 1 second and aired 769 two-minute blips in one week.
+    (with-redefs [channels-db/get-channel (fn [_ _] {:channels/id 1})
+                  playout-db/get-playout-for-channel (fn [_ _] {:playouts/id 1})
+                  playout-db/delete-events! (fn [& _] 0)
+                  playout-db/bulk-insert-events! (fn [& _] nil)
+                  db-core/query-one (fn [_ _] nil)
+                  db-core/query (fn [_ sqlvec]
+                                  (let [sql (str/lower-case (or (first sqlvec) ""))]
+                                    (cond
+                                      (str/includes? sql "from metadata_tags")
+                                      [{:metadata/media-item-id 50561 :metadata-tags/name "channel:spotlight"}]
+                                      :else
+                                      [{:media-items/id 50561 :media-items/kind "movie"
+                                        ;; 1-second probe on a real movie file.
+                                        :duration (java.time.Duration/ofSeconds 1)}])))]
+      (let [batch [{:start-time "2026-11-10T20:00:00"
+                    :end-time   "2026-11-10T22:00:00"
+                    :media-id   "random:movie"
+                    :media-selection-strategy "random"
+                    :category-filters []
+                    :notes []}]
+            handler (make-test-handler)
+            resp    (handler (-> (mock/request :post "/api/channels/1/daily-slots")
+                                 (mock/json-body batch)))]
+        (is (= 200 (:status resp)))
+        (let [body (parse-json-body resp)]
+          (is (= 0 (:ingested body)) "the broken-probe movie is not ingested")
+          (is (= 1 (:skipped body)))
+          (is (re-find #"(?i)no playable items" (first (:errors body)))))))))
+
+(deftest implausible-runtime-marks-short-movies-and-tiny-episodes
+  (testing "implausible-runtime? flags movies under 20 min and episodes under 60 s, but not a 7-minute short episode"
+    (is (#'ds/implausible-runtime? {:media-items/kind "movie"
+                                   :duration (java.time.Duration/ofSeconds 1)}))
+    (is (#'ds/implausible-runtime? {:media-items/kind "movie"
+                                   :duration (java.time.Duration/ofMinutes 6)}))
+    (is (not (#'ds/implausible-runtime? {:media-items/kind "movie"
+                                        :duration (java.time.Duration/ofMinutes 90)})))
+    (is (#'ds/implausible-runtime? {:media-items/kind "episode"
+                                   :duration (java.time.Duration/ofSeconds 15)}))
+    (is (not (#'ds/implausible-runtime? {:media-items/kind "episode"
+                                        :duration (java.time.Duration/ofSeconds 61)})))
+    ;; No duration at all: playable-item?'s concern, not this gate's.
+    (is (not (#'ds/implausible-runtime? {:media-items/kind "episode"})))))
 
 ;; -----------------------------------------------------------------------
 ;; Regression: duration is read under the qualified `:media-versions/duration`
